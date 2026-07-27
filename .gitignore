@@ -1,6 +1,12 @@
 .venv/
+venv/
 __pycache__/
 *.pyc
 storage/jobs/*
 !storage/jobs/.gitkeep
+storage/r2o_checks/*
+!storage/r2o_checks/.gitkeep
+build/
+dist/
 .DS_Store
+Thumbs.db

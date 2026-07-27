@@ -125,14 +125,20 @@ WLC_BULK_COMMANDS = [
 AIREOS_COMMANDS: list[tuple[str, int]] = [
     ("show interface detailed management", 60),
     ("show redundancy summary", 60),
-    ("show run-config", 1200),
     ("show wlan apgroups", 60),
     ("show advanced 802.11a summary", 60),
     ("show advanced 802.11b summary", 60),
+    ("show ap summary", 120),
     ("show ap inventory all", 600),
     ("show ap stats ethernet summary", 120),
+    ("show ap cdp neighbors all", 180),
     ("show cdp nei", 60),
     ("show lldp nei", 60),
+    # Kept last deliberately: by far the slowest, most fragile command
+    # (confirmed to run to 200K+ lines on a large real deployment), so a
+    # manually-interrupted or otherwise cut-short session still collects
+    # everything else first rather than losing it all behind this one.
+    ("show run-config", 1200),
 ]
 
 INVALID_PATTERNS = (
@@ -275,6 +281,109 @@ def parse_ap_names(show_ap_summary: str) -> list[str]:
         if re.fullmatch(r"[A-Za-z0-9_.:-]{2,64}", token) and token not in names:
             names.append(token)
     return names
+
+
+def parse_aireos_ap_ethernet_summary(output: str) -> list[dict[str, str]]:
+    """Parses AireOS `show ap stats ethernet summary` output into one row per
+    AP (its primary/first Ethernet interface). Format confirmed against a
+    real 5520 capture: each AP's block starts with the AP name at column 0
+    immediately followed by its interface name, status, and speed;
+    continuation lines for the AP's other interfaces (e.g. LAN1) are
+    indented, and are skipped here since they repeat the same AP name."""
+    rows: list[dict[str, str]] = []
+    for line in output.splitlines():
+        if not line.strip() or line[0].isspace():
+            continue
+        parts = line.split()
+        if len(parts) < 3 or "ethernet" not in parts[1].lower():
+            continue  # header/separator line, or anything not matching the expected shape
+        rows.append({
+            "ap_name": parts[0], "interface": parts[1], "status": parts[2],
+            "speed": parts[3] if len(parts) > 3 else "",
+        })
+    return rows
+
+
+def parse_aireos_ap_cdp_neighbors(output: str) -> list[dict[str, str]]:
+    """Parses AireOS `show ap cdp neighbors all` output. Format confirmed
+    against a real 5520 capture (256 APs): each AP has one line with its
+    name, its own IP, the upstream neighbor switch's name, and the neighbor
+    port, followed by an indented continuation line giving the neighbor
+    switch's own IP address."""
+    rows: list[dict[str, str]] = []
+    lines = output.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        is_separator = stripped and not (set(stripped.replace(" ", "")) - {"-"})
+        if not stripped or is_separator or stripped.lower().startswith("ap name") or line[:1].isspace():
+            i += 1
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            i += 1
+            continue
+        ap_name, ap_ip, neighbor_name = parts[0], parts[1], parts[2]
+        neighbor_port = " ".join(parts[3:])
+        neighbor_ip = ""
+        if i + 1 < len(lines) and lines[i + 1][:1].isspace():
+            match = re.search(r"IP address:\s*(\S+)", lines[i + 1])
+            if match:
+                neighbor_ip = match.group(1)
+            i += 1  # consume the continuation line so it isn't misread as its own row
+        rows.append({
+            "ap_name": ap_name, "ap_ip": ap_ip, "neighbor_name": neighbor_name,
+            "neighbor_port": neighbor_port, "neighbor_ip": neighbor_ip,
+        })
+        i += 1
+    return rows
+
+
+def parse_aireos_ap_summary(output: str) -> list[dict[str, str]]:
+    """Parses AireOS `show ap summary` output - a fixed-width table where
+    the Location column can contain spaces (e.g. "default location"), so
+    only the first four columns (AP Name, Slots, AP Model, Ethernet MAC -
+    none of which contain spaces) are extracted; everything from Location
+    onward is intentionally not parsed rather than risk misaligning on a
+    column that can contain embedded spaces. Confirmed against a real
+    5520 capture (256 APs). Parsing starts after the dashed separator line
+    so the preceding summary/header lines are never mistaken for data."""
+    rows: list[dict[str, str]] = []
+    started = False
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not started:
+            if stripped and not (set(stripped.replace(" ", "")) - {"-"}):
+                started = True
+            continue
+        if not stripped:
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        ap_name, _slots, model, mac = parts[0], parts[1], parts[2], parts[3]
+        if not re.fullmatch(r"[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}", mac):
+            continue  # doesn't look like a MAC in the expected column - skip defensively
+        rows.append({"ap_name": ap_name, "model": model, "mac_address": mac})
+    return rows
+
+
+def parse_aireos_ap_inventory(output: str) -> list[dict[str, str]]:
+    """Parses AireOS `show ap inventory all` output: repeated per-AP blocks,
+    each starting with 'Inventory for <ap-name>' followed by NAME/DESCR and
+    PID/VID/SN lines. Confirmed against a real 5520 capture."""
+    rows: list[dict[str, str]] = []
+    blocks = re.split(r"(?m)^Inventory for\s+(\S+)\s*$", output)
+    pairs = iter(blocks[1:])  # blocks[0] is anything before the first match (should be empty)
+    for ap_name, block in zip(pairs, pairs):
+        pid = re.search(r"PID:\s*([^,\s]+)", block)
+        serial = re.search(r"SN:\s*([^,\s]+)", block)
+        rows.append({
+            "ap_name": ap_name, "model": pid.group(1) if pid else "",
+            "serial_number": serial.group(1) if serial else "",
+        })
+    return rows
 
 
 def unique_log_path(job_dir: Path, hostname: str, host: str) -> Path:
@@ -479,6 +588,10 @@ def collect_one(
             seen: set[str] = {"show version", "show inventory"}
 
         show_logging_output = ""
+        aireos_ap_ethernet_output = ""
+        aireos_ap_cdp_output = ""
+        aireos_ap_summary_output = ""
+        aireos_ap_inventory_output = ""
         for command, timeout in commands:
             if command in seen:
                 continue
@@ -497,6 +610,21 @@ def collect_one(
             append_section(parts, command, output, status)
             if command == "show logging" and status == "SUCCESS":
                 show_logging_output = output
+            if command == "show ap stats ethernet summary" and status == "SUCCESS":
+                aireos_ap_ethernet_output = output
+            if command == "show ap cdp neighbors all" and status == "SUCCESS":
+                aireos_ap_cdp_output = output
+            if command == "show ap summary" and status == "SUCCESS":
+                aireos_ap_summary_output = output
+            if command == "show ap inventory all" and status == "SUCCESS":
+                aireos_ap_inventory_output = output
+
+        if device.device_type == "cisco_wlc" and any([aireos_ap_ethernet_output, aireos_ap_cdp_output, aireos_ap_summary_output, aireos_ap_inventory_output]):
+            ap_names = {row["ap_name"] for row in parse_aireos_ap_ethernet_summary(aireos_ap_ethernet_output)}
+            ap_names |= {row["ap_name"] for row in parse_aireos_ap_cdp_neighbors(aireos_ap_cdp_output)}
+            ap_names |= {row["ap_name"] for row in parse_aireos_ap_summary(aireos_ap_summary_output)}
+            ap_names |= {row["ap_name"] for row in parse_aireos_ap_inventory(aireos_ap_inventory_output)}
+            result.access_point_count = len(ap_names)
 
         if show_logging_output:
             log_alerts = analyze_show_logging(show_logging_output)

@@ -11,13 +11,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .collector import CollectionOptions, Device, run_collection_job
 from .network_tools import run_bulk_tests
+from .r2o_check import run_r2o_check
 
 
 def _resolve_bundle_dir() -> Path:
@@ -41,6 +42,8 @@ def _resolve_storage_root() -> Path:
 BASE_DIR = _resolve_bundle_dir()
 STORAGE_ROOT = _resolve_storage_root()
 STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
+R2O_STORAGE_ROOT = STORAGE_ROOT.parent / "r2o_checks"
+R2O_STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
 JOB_META_FILENAME = "job_meta.json"
 
 app = FastAPI(title="Network Automation Studio", version="2.3.0")
@@ -353,6 +356,70 @@ async def network_tests(request: Request) -> JSONResponse:
 
     results = await asyncio.to_thread(run_bulk_tests, targets, timeout)
     return JSONResponse({"count": len(results), "results": results})
+
+
+@app.post("/api/r2o-check")
+async def r2o_check(
+    site_label: str = Form("R2O Check"),
+    sitebook: UploadFile | None = File(None),
+    lld: UploadFile | None = File(None),
+    cmdb: UploadFile | None = File(None),
+    network_diagram: UploadFile | None = File(None),
+    rack_elevations: UploadFile | None = File(None),
+) -> JSONResponse:
+    uploads = {
+        "sitebook": sitebook, "lld": lld, "cmdb": cmdb,
+        "network_diagram": network_diagram, "rack_elevations": rack_elevations,
+    }
+    if not any(uploads.values()):
+        raise HTTPException(status_code=400, detail="Upload at least one document")
+
+    max_bytes = 60 * 1024 * 1024  # generous headroom above the ~23MB seen in practice
+    read_bytes: dict[str, bytes | None] = {}
+    for key, upload in uploads.items():
+        if upload is None:
+            read_bytes[key] = None
+            continue
+        content = await upload.read()
+        if len(content) > max_bytes:
+            raise HTTPException(status_code=400, detail=f"{upload.filename} is too large (max 60MB)")
+        read_bytes[key] = content
+
+    try:
+        findings, summary, workbook, source_counts = await asyncio.to_thread(
+            run_r2o_check,
+            site_label.strip() or "R2O Check",
+            read_bytes["sitebook"], read_bytes["lld"], read_bytes["cmdb"],
+            read_bytes["network_diagram"], read_bytes["rack_elevations"],
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not process the uploaded documents: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    check_id = uuid.uuid4().hex
+    check_dir = R2O_STORAGE_ROOT / check_id
+    check_dir.mkdir(parents=True, exist_ok=True)
+    report_path = check_dir / "r2o-check-report.xlsx"
+    workbook.save(report_path)
+
+    return JSONResponse({
+        "check_id": check_id,
+        "site_label": site_label,
+        "source_counts": source_counts,
+        "summary": summary,
+        "conflicts": findings["conflicts"],
+        "coverage_gaps": findings["coverage_gaps"],
+    })
+
+
+@app.get("/api/r2o-check/{check_id}/download")
+async def download_r2o_report(check_id: str) -> FileResponse:
+    report_path = R2O_STORAGE_ROOT / check_id / "r2o-check-report.xlsx"
+    if not report_path.is_file():
+        raise HTTPException(status_code=404, detail="Report not found")
+    return FileResponse(report_path, filename=f"r2o-check-{check_id[:8]}.xlsx")
 
 
 @app.websocket("/ws/jobs/{job_id}")

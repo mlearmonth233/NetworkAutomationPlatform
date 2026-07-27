@@ -19,6 +19,7 @@
         <button id="nav-profiles" class="nav-item" type="button">Command Profiles</button>
         <button id="nav-network-tools" class="nav-item" type="button">Ping &amp; DNS Checker</button>
         <button id="nav-history" class="nav-item" type="button">History</button>
+        <button id="nav-r2o" class="nav-item" type="button">R2O Check</button>
         <button class="nav-item" disabled>Compliance</button>
       </nav>
       <div class="sidebar-note">
@@ -53,6 +54,7 @@
               Upload CSV
               <input id="csv-file" type="file" accept=".csv,text/csv" hidden>
             </label>
+            <button id="download-template" class="button ghost" type="button">Download CSV template</button>
             <button id="add-device" class="button secondary" type="button">Add device</button>
             <button id="paste-devices" class="button secondary" type="button">Paste list</button>
             <button id="load-example" class="button ghost" type="button">Load example</button>
@@ -64,7 +66,7 @@
               <tbody id="device-body"></tbody>
             </table>
           </div>
-          <p class="help">CSV columns: <code>name,host,port,device_type</code>. Only name and host are required.</p>
+          <p class="help">CSV columns: <code>name,host,port,device_type</code>. Only name and host are required. Not sure what to put in <code>device_type</code>? Download the template above for a working example of each supported type.</p>
         </div>
 
         <div class="card">
@@ -251,6 +253,85 @@ show standby brief"></textarea>
             </table>
           </div>
           <p id="history-empty" class="help hidden">No collection jobs yet. Start one from the Collector page.</p>
+        </section>
+      </div>
+
+      <div id="r2o-view" class="app-view hidden">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">DOCUMENT VALIDATION</p>
+            <h1>R2O Check</h1>
+            <p class="subtitle">Upload the 5 R2O documents for a site. The IT/OT Sitebook is treated as source of truth; the others are checked against it for hostname, MAC, serial, asset tag, model, and IP consistency.</p>
+          </div>
+          <div class="status-pill"><span class="dot"></span> Local runner</div>
+        </header>
+
+        <section class="card">
+          <div class="card-header">
+            <div><p class="step">STEP 1</p><h2>Upload documents</h2></div>
+          </div>
+          <label class="field-label" for="r2o-site-label">Site label (used in the report title)</label>
+          <input id="r2o-site-label" class="table-input" style="max-width:420px" placeholder="e.g. 7901 Manaus Solimoes" value="R2O Check">
+
+          <div class="r2o-upload-grid">
+            <div class="r2o-upload-row r2o-upload-truth">
+              <label for="r2o-file-sitebook">IT/OT Sitebook <span class="r2o-truth-badge">source of truth</span></label>
+              <input id="r2o-file-sitebook" type="file" accept=".xlsm,.xlsx">
+            </div>
+            <div class="r2o-upload-row">
+              <label for="r2o-file-lld">LLD</label>
+              <input id="r2o-file-lld" type="file" accept=".xlsx">
+            </div>
+            <div class="r2o-upload-row">
+              <label for="r2o-file-cmdb">CMDB Export</label>
+              <input id="r2o-file-cmdb" type="file" accept=".xlsx">
+            </div>
+            <div class="r2o-upload-row">
+              <label for="r2o-file-network-diagram">Network Diagram</label>
+              <input id="r2o-file-network-diagram" type="file" accept=".vsdx">
+            </div>
+            <div class="r2o-upload-row">
+              <label for="r2o-file-rack-elevations">Rack Elevations</label>
+              <input id="r2o-file-rack-elevations" type="file" accept=".vsdx">
+            </div>
+          </div>
+          <p class="help">All 5 are optional - upload whatever you have. Rack Elevations files can be large (20MB+); the check may take a few seconds longer with it included.</p>
+          <div class="button-row">
+            <button id="r2o-run" class="button primary" type="button">Run R2O Check</button>
+          </div>
+          <p id="r2o-error" class="error-text hidden"></p>
+        </section>
+
+        <section id="r2o-results" class="card hidden">
+          <div class="card-header">
+            <div><p class="step">RESULTS</p><h2 id="r2o-results-title">Findings</h2></div>
+            <a id="r2o-download" class="button secondary" href="#">Download full report</a>
+          </div>
+          <div class="summary-grid">
+            <div><span>Value conflicts</span><strong id="r2o-conflict-count">0</strong></div>
+            <div><span>Coverage gaps</span><strong id="r2o-gap-count">0</strong></div>
+            <div><span>Decommissioned (excluded)</span><strong id="r2o-decomm-count">0</strong></div>
+          </div>
+          <div id="r2o-systematic" class="log-alert-banner hidden"></div>
+          <div id="r2o-structural" class="r2o-structural-note hidden"></div>
+
+          <h3 class="r2o-subheading">Value conflicts</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Hostname</th><th>Field</th><th>Sitebook Value</th><th>Conflicting Source</th><th>Conflicting Value</th></tr></thead>
+              <tbody id="r2o-conflicts-body"></tbody>
+            </table>
+          </div>
+          <p id="r2o-conflicts-empty" class="help hidden">No value conflicts found.</p>
+
+          <h3 class="r2o-subheading">Coverage gaps (missing from Sitebook)</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Hostname</th><th>Present In</th></tr></thead>
+              <tbody id="r2o-gaps-body"></tbody>
+            </table>
+          </div>
+          <p id="r2o-gaps-empty" class="help hidden">No coverage gaps found.</p>
         </section>
       </div>
     </main>

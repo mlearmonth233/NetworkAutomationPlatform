@@ -165,3 +165,13 @@ input:focus, textarea:focus { outline: 2px solid #dbe2ff; border-color: #8ba0ef;
 .concurrency-row { display:flex; justify-content:space-between; align-items:center; gap:18px; padding:16px; background:#f7f9fc; border-radius:12px; margin-top:18px; }
 .concurrency-row label { display:grid; gap:5px; }
 .concurrency-row span { color:var(--muted); font-size:12px; }
+
+.error-text { color: var(--danger); font-size: 13px; margin-top: 8px; }
+.r2o-upload-grid { display: grid; gap: 12px; margin: 16px 0; }
+.r2o-upload-row { display: flex; align-items: center; gap: 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: #fafbfd; }
+.r2o-upload-row label { min-width: 160px; font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+.r2o-upload-row input[type="file"] { flex: 1; font-size: 13px; }
+.r2o-upload-truth { border-color: var(--accent); background: var(--accent-soft); }
+.r2o-truth-badge { font-size: 10px; font-weight: 800; letter-spacing: 0.03em; text-transform: uppercase; color: var(--accent); background: white; border: 1px solid var(--accent); border-radius: 999px; padding: 2px 8px; }
+.r2o-structural-note { margin: 16px 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: #f7f9fc; color: var(--ink); font-size: 13px; line-height: 1.6; }
+.r2o-subheading { margin: 24px 0 10px; font-size: 15px; }

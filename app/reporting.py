@@ -9,7 +9,13 @@ from pathlib import Path
 from typing import Any, Iterable
 from xml.etree.ElementTree import Element, SubElement, tostring
 
-from .collector import DeviceResult
+from .collector import (
+    DeviceResult,
+    parse_aireos_ap_cdp_neighbors,
+    parse_aireos_ap_ethernet_summary,
+    parse_aireos_ap_inventory,
+    parse_aireos_ap_summary,
+)
 from .log_analysis import analyze_show_logging
 
 SECTION_RE = re.compile(
@@ -250,6 +256,40 @@ def collect_report_data(results: list[DeviceResult]) -> dict[str, list[dict[str,
                 })
         if "show ap config general" in sections:
             data["aps"].extend(parse_ap_config(sections["show ap config general"]["output"], hostname, result.host))
+        elif any(cmd in sections for cmd in (
+            "show ap stats ethernet summary", "show ap cdp neighbors all", "show ap summary", "show ap inventory all",
+        )):
+            # AireOS path: merge whichever of these four commands ran, keyed
+            # by AP name, since together they cover hostname, IP address,
+            # MAC address, model, and serial number.
+            ap_rows: dict[str, dict[str, Any]] = {}
+
+            def ap_row(ap_name: str) -> dict[str, Any]:
+                return ap_rows.setdefault(ap_name, {
+                    "controller": hostname, "controller_ip": result.host, "hostname": ap_name,
+                })
+
+            if "show ap stats ethernet summary" in sections:
+                for row in parse_aireos_ap_ethernet_summary(sections["show ap stats ethernet summary"]["output"]):
+                    ap_row(row["ap_name"])
+            if "show ap summary" in sections:
+                for row in parse_aireos_ap_summary(sections["show ap summary"]["output"]):
+                    entry = ap_row(row["ap_name"])
+                    entry["model"] = row["model"]
+                    entry["mac_address"] = row["mac_address"]
+            if "show ap inventory all" in sections:
+                for row in parse_aireos_ap_inventory(sections["show ap inventory all"]["output"]):
+                    entry = ap_row(row["ap_name"])
+                    entry.setdefault("model", row["model"])
+                    entry["serial_number"] = row["serial_number"]
+            if "show ap cdp neighbors all" in sections:
+                for row in parse_aireos_ap_cdp_neighbors(sections["show ap cdp neighbors all"]["output"]):
+                    entry = ap_row(row["ap_name"])
+                    entry["ip_address"] = row["ap_ip"]
+                    entry["neighbor_name"] = row["neighbor_name"]
+                    entry["neighbor_ip"] = row["neighbor_ip"]
+                    entry["neighbor_port"] = row["neighbor_port"]
+            data["aps"].extend(ap_rows.values())
         if "show interfaces status" in sections:
             data["interfaces"].extend(parse_interface_status(sections["show interfaces status"]["output"], hostname, result.host))
         if "show ip interface brief" in sections:
@@ -420,7 +460,8 @@ def create_technical_review_workbook(job_dir: Path, results: list[DeviceResult])
         ("site_tag", "Site Tag"), ("policy_tag", "Policy Tag"), ("rf_tag", "RF Tag"),
         ("country", "Country"), ("state", "State"), ("uptime", "Uptime"), ("join_time", "Join Time"),
         ("primary_controller", "Primary Controller"), ("secondary_controller", "Secondary Controller"),
-    ]), [24, 18, 26, 20, 18, 20, 18, 18, 28, 24, 24, 24, 14, 16, 22, 24, 24, 24])
+        ("neighbor_name", "Neighbor Switch"), ("neighbor_ip", "Neighbor Switch IP"), ("neighbor_port", "Neighbor Port"),
+    ]), [24, 18, 26, 20, 18, 20, 18, 18, 28, 24, 24, 24, 14, 16, 22, 24, 24, 24, 26, 20, 20])
     writer.add_sheet("Interfaces", rows_for_sheet(data["interfaces"], [
         ("device", "Device"), ("management_ip", "Management IP"), ("interface", "Interface"),
         ("description", "Description"), ("status", "Status"), ("protocol", "Protocol"),

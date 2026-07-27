@@ -5,6 +5,7 @@ const LAST_JOB_KEY = 'nas-last-job';
 const DEVICE_TYPE_PRESETS = [
   { value: 'cisco_ios', label: 'Cisco IOS / IOS-XE / C9800 WLC' },
   { value: 'cisco_nxos', label: 'Cisco Nexus (NX-OS)' },
+  { value: 'cisco_wlc', label: 'Cisco AireOS WLC (5500/8500/WiSM2)' },
 ];
 function isKnownDeviceType(value) { return DEVICE_TYPE_PRESETS.some(p => p.value === value); }
 
@@ -68,7 +69,26 @@ function closeModal() { $('modal').classList.add('hidden'); }
 function showError(message) { openModal('Unable to continue', `<div class="error-banner">${escapeHtml(message)}</div><div class="modal-actions"><button class="button primary" onclick="document.getElementById('modal').classList.add('hidden')">Close</button></div>`); }
 
 $('add-device').addEventListener('click', () => addDevice());
-$('load-example').addEventListener('click', () => { state.devices = [{name:'USLIAP01SWA055',host:'192.0.2.55',port:22,device_type:'cisco_ios'},{name:'USLIAP01SWC001',host:'192.0.2.10',port:22,device_type:'cisco_ios'},{name:'USLIAP01NXA001',host:'192.0.2.20',port:22,device_type:'cisco_nxos'}]; renderDevices(); });
+$('load-example').addEventListener('click', () => { state.devices = [{name:'USLIAP01SWA055',host:'192.0.2.55',port:22,device_type:'cisco_ios'},{name:'USLIAP01SWC001',host:'192.0.2.10',port:22,device_type:'cisco_ios'},{name:'USLIAP01NXA001',host:'192.0.2.20',port:22,device_type:'cisco_nxos'},{name:'USLIAP01WLC001',host:'192.0.2.30',port:22,device_type:'cisco_wlc'}]; renderDevices(); });
+
+$('download-template').addEventListener('click', () => {
+  const rows = [
+    ['name', 'host', 'port', 'device_type'],
+    ['CORE-SWITCH-01', '192.0.2.10', '22', 'cisco_ios'],
+    ['NEXUS-SWITCH-01', '192.0.2.20', '22', 'cisco_nxos'],
+    ['WLC-5520-01', '192.0.2.30', '22', 'cisco_wlc'],
+  ];
+  const csv = rows.map(row => row.join(',')).join('\r\n') + '\r\n';
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'device-list-template.csv';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+});
 $('csv-file').addEventListener('change', async e => { const file=e.target.files[0]; if(file){ state.devices=parseCsv(await file.text()); renderDevices(); } });
 $('paste-devices').addEventListener('click', () => {
   openModal('Paste devices', `<p class="help">Paste one device per line. Supported formats: <code>name,ip</code> or just <code>ip</code>.</p><textarea id="paste-area" rows="10" style="width:100%" placeholder="SWA001,10.10.10.11\nSWA002,10.10.10.12"></textarea><div class="modal-actions"><button class="button secondary" id="paste-cancel">Cancel</button><button class="button primary" id="paste-add">Add devices</button></div>`);
@@ -327,7 +347,7 @@ function renderCoreProfile(name='catalyst') {
   document.querySelectorAll('.profile-tab').forEach(button => button.classList.toggle('active', button.dataset.profile === name));
 }
 function showAppView(viewName) {
-  ['collector','profiles','network-tools','history'].forEach(name => {
+  ['collector','profiles','network-tools','history','r2o'].forEach(name => {
     $(`${name}-view`).classList.toggle('hidden', name !== viewName);
     const nav = $(`nav-${name}`); if (nav) nav.classList.toggle('active', name === viewName);
   });
@@ -339,6 +359,7 @@ $('nav-profiles').addEventListener('click', () => showAppView('profiles'));
 $('nav-network-tools').addEventListener('click', () => showAppView('network-tools'));
 $('nav-history').addEventListener('click', () => { showAppView('history'); loadHistory(); });
 $('refresh-history').addEventListener('click', loadHistory);
+$('nav-r2o').addEventListener('click', () => showAppView('r2o'));
 document.querySelectorAll('.profile-tab').forEach(button => button.addEventListener('click', () => renderCoreProfile(button.dataset.profile)));
 $('save-custom-commands').addEventListener('click', saveCustomCommands);
 $('clear-custom-commands').addEventListener('click', () => { $('custom-commands').value=''; saveCustomCommands(); });
@@ -454,3 +475,78 @@ $('export-network-csv').addEventListener('click', () => {
   link.remove();
   URL.revokeObjectURL(url);
 });
+
+$('r2o-run').addEventListener('click', async () => {
+  const fileInputs = {
+    sitebook: $('r2o-file-sitebook'), lld: $('r2o-file-lld'), cmdb: $('r2o-file-cmdb'),
+    network_diagram: $('r2o-file-network-diagram'), rack_elevations: $('r2o-file-rack-elevations'),
+  };
+  const form = new FormData();
+  form.append('site_label', $('r2o-site-label').value.trim() || 'R2O Check');
+  let anyFile = false;
+  Object.entries(fileInputs).forEach(([key, input]) => {
+    if (input.files && input.files[0]) { form.append(key, input.files[0]); anyFile = true; }
+  });
+  $('r2o-error').classList.add('hidden');
+  if (!anyFile) {
+    $('r2o-error').textContent = 'Upload at least one document.';
+    $('r2o-error').classList.remove('hidden');
+    return;
+  }
+  $('r2o-run').disabled = true;
+  $('r2o-run').textContent = 'Running check…';
+  try {
+    const response = await fetch('/api/r2o-check', { method: 'POST', body: form });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || 'R2O check failed');
+    renderR2oResults(payload);
+  } catch (error) {
+    $('r2o-error').textContent = error.message;
+    $('r2o-error').classList.remove('hidden');
+  } finally {
+    $('r2o-run').disabled = false;
+    $('r2o-run').textContent = 'Run R2O Check';
+  }
+});
+
+function renderR2oResults(payload) {
+  $('r2o-results').classList.remove('hidden');
+  $('r2o-results-title').textContent = `Findings - ${payload.site_label}`;
+  $('r2o-download').href = `/api/r2o-check/${payload.check_id}/download`;
+  $('r2o-conflict-count').textContent = payload.summary.conflict_count;
+  $('r2o-gap-count').textContent = payload.summary.coverage_gap_count;
+  $('r2o-decomm-count').textContent = payload.summary.decommissioned_count;
+
+  const groups = payload.summary.systematic_groups || [];
+  if (groups.length) {
+    $('r2o-systematic').classList.remove('hidden');
+    $('r2o-systematic').innerHTML = '<strong>Systematic gaps - likely worth checking first</strong>' +
+      groups.map(g => `<span>${g.count} devices starting with '${escapeHtml(g.prefix)}' exist in other documents but do not appear in the Sitebook at all.</span>`).join('');
+  } else {
+    $('r2o-systematic').classList.add('hidden');
+  }
+
+  const structural = payload.summary.structural_gaps || [];
+  if (structural.length) {
+    $('r2o-structural').classList.remove('hidden');
+    $('r2o-structural').innerHTML = '<strong>Structural gaps</strong> (a field the Sitebook doesn\'t capture for this device category - not per-device errors)<br>' +
+      structural.map(s => `${escapeHtml(s.source)}: '${escapeHtml(s.field)}' is populated for ${s.gap_count} of ${s.overlap} matching devices, but the Sitebook has none of them.`).join('<br>');
+  } else {
+    $('r2o-structural').classList.add('hidden');
+  }
+
+  const conflicts = payload.conflicts || [];
+  $('r2o-conflicts-empty').classList.toggle('hidden', conflicts.length > 0);
+  $('r2o-conflicts-body').innerHTML = conflicts.map(c => `<tr>
+    <td>${escapeHtml(c.hostname)}</td><td>${escapeHtml(c.field)}</td><td>${escapeHtml(c.sitebook_value)}</td>
+    <td>${escapeHtml(c.source)}</td><td>${escapeHtml(c.other_value)}</td>
+  </tr>`).join('');
+
+  const gaps = payload.coverage_gaps || [];
+  $('r2o-gaps-empty').classList.toggle('hidden', gaps.length > 0);
+  $('r2o-gaps-body').innerHTML = gaps.map(g => `<tr>
+    <td>${escapeHtml(g.hostname)}</td><td>${escapeHtml((g.present_in || []).join(', '))}</td>
+  </tr>`).join('');
+
+  $('r2o-results').scrollIntoView({behavior: 'smooth', block: 'start'});
+}
