@@ -15,6 +15,7 @@ from .collector import (
     parse_aireos_ap_ethernet_summary,
     parse_aireos_ap_inventory,
     parse_aireos_ap_summary,
+    parse_aireos_radio_summary,
 )
 from .log_analysis import analyze_show_logging
 
@@ -45,9 +46,19 @@ def normalise_mac(value: str) -> str:
 def parse_ap_config(output: str, controller: str, controller_ip: str) -> list[dict[str, Any]]:
     # C9800 output uses repeated labelled blocks. Split before the AP name label while
     # retaining the label, then promote the most useful technical-review fields.
-    starts = list(re.finditer(r"(?im)^(?:Cisco\s+)?AP\s+(?:Name|Identifier)\s*[:.]", output))
-    if not starts:
-        starts = list(re.finditer(r"(?im)^AP Name\s*[:.]", output))
+    starts_raw = list(re.finditer(r"(?im)^(?:Cisco\s+)?AP\s+(?:Name|Identifier)\s*[:.]", output))
+    if not starts_raw:
+        starts_raw = list(re.finditer(r"(?im)^AP Name\s*[:.]", output))
+    # 'AP Name' and 'AP Identifier' are both valid block-start labels on
+    # different C9800 output variants, but if a single AP's block happens
+    # to state both (as separate lines near the top), a naive split would
+    # wrongly treat the second one as a new AP. Matches within a couple of
+    # short lines of each other are merged into a single block instead.
+    starts: list[re.Match] = []
+    for match in starts_raw:
+        if starts and match.start() - starts[-1].start() < 120:
+            continue
+        starts.append(match)
     blocks: list[str] = []
     if starts:
         for idx, match in enumerate(starts):
@@ -86,8 +97,53 @@ def parse_ap_config(output: str, controller: str, controller_ip: str) -> list[di
                     break
         if row.get("mac_address"):
             row["mac_address"] = normalise_mac(str(row["mac_address"]))
+        # Each AP's block repeats a "Base Radio MAC" line once per radio
+        # slot (2.4GHz first, then 5GHz) - based on documented C9800
+        # 'show ap config general' structure, not verified against a real
+        # capture the way the AireOS radio parsing below is. If this comes
+        # back empty or misaligned on a real C9800 unit, that's the first
+        # place to check.
+        radio_macs = re.findall(r"^\s*Base Radio MAC\s*[:.]\s*(\S+)", block, re.MULTILINE | re.IGNORECASE)
+        if len(radio_macs) >= 1:
+            row["radio_mac_24ghz"] = normalise_mac(radio_macs[0])
+        if len(radio_macs) >= 2:
+            row["radio_mac_5ghz"] = normalise_mac(radio_macs[1])
         if row.get("hostname") or row.get("mac_address") or row.get("serial_number"):
             rows.append(row)
+    return rows
+
+
+def parse_c9800_ap_summary(output: str) -> list[dict[str, str]]:
+    """Parses C9800 `show ap summary` output - a single bulk table giving
+    both the Ethernet MAC and a 'Radio MAC' (the AP's base radio MAC,
+    covering both bands - this command doesn't expose separate per-band
+    values the way AireOS's 802.11a/b summary commands do) per AP.
+    Confirmed against a real 9800 capture (264 APs). Only the first 8
+    columns are extracted (AP Name, Slots, Model, Ethernet MAC, Radio MAC,
+    Country, RD, IP Address) - State/Location are deliberately left
+    unparsed since Location is known to contain spaces (e.g. 'default
+    location'), which would misalign a naive whitespace split for
+    anything after it."""
+    rows: list[dict[str, str]] = []
+    started = False
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not started:
+            if stripped and not (set(stripped.replace(" ", "")) - {"-"}):
+                started = True
+            continue
+        if not stripped:
+            continue
+        parts = line.split()
+        if len(parts) < 8:
+            continue
+        ap_name, _slots, model, eth_mac, radio_mac, country, _rd, ip_address = parts[:8]
+        if not re.fullmatch(r"[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}", eth_mac):
+            continue  # doesn't look like a MAC in the expected column - skip defensively
+        rows.append({
+            "ap_name": ap_name, "model": model, "mac_address": normalise_mac(eth_mac),
+            "radio_mac": normalise_mac(radio_mac), "country": country, "ip_address": ip_address,
+        })
     return rows
 
 
@@ -369,13 +425,28 @@ def collect_report_data(results: list[DeviceResult]) -> dict[str, list[dict[str,
                     "raw_example": alert["raw_example"],
                 })
         if "show ap config general" in sections:
-            data["aps"].extend(parse_ap_config(sections["show ap config general"]["output"], hostname, result.host))
+            c9800_aps: dict[str, dict[str, Any]] = {}
+            for row in parse_ap_config(sections["show ap config general"]["output"], hostname, result.host):
+                if row.get("hostname"):
+                    c9800_aps[row["hostname"]] = row
+            if "show ap summary" in sections:
+                for row in parse_c9800_ap_summary(sections["show ap summary"]["output"]):
+                    entry = c9800_aps.setdefault(row["ap_name"], {
+                        "controller": hostname, "controller_ip": result.host, "hostname": row["ap_name"],
+                    })
+                    entry.setdefault("model", row["model"])
+                    entry.setdefault("mac_address", row["mac_address"])
+                    entry.setdefault("ip_address", row["ip_address"])
+                    entry.setdefault("country", row["country"])
+                    entry["radio_mac"] = row["radio_mac"]  # not available from show ap config general at all
+            data["aps"].extend(c9800_aps.values())
         elif any(cmd in sections for cmd in (
             "show ap stats ethernet summary", "show ap cdp neighbors all", "show ap summary", "show ap inventory all",
+            "show advanced 802.11a summary", "show advanced 802.11b summary",
         )):
-            # AireOS path: merge whichever of these four commands ran, keyed
+            # AireOS path: merge whichever of these six commands ran, keyed
             # by AP name, since together they cover hostname, IP address,
-            # MAC address, model, and serial number.
+            # MAC address, model, serial number, and per-band radio MAC.
             ap_rows: dict[str, dict[str, Any]] = {}
 
             def ap_row(ap_name: str) -> dict[str, Any]:
@@ -403,6 +474,12 @@ def collect_report_data(results: list[DeviceResult]) -> dict[str, list[dict[str,
                     entry["neighbor_name"] = row["neighbor_name"]
                     entry["neighbor_ip"] = row["neighbor_ip"]
                     entry["neighbor_port"] = row["neighbor_port"]
+            if "show advanced 802.11b summary" in sections:  # 2.4GHz radio, always slot 0
+                for ap_name, mac in parse_aireos_radio_summary(sections["show advanced 802.11b summary"]["output"]).items():
+                    ap_row(ap_name)["radio_mac_24ghz"] = mac
+            if "show advanced 802.11a summary" in sections:  # 5GHz radio
+                for ap_name, mac in parse_aireos_radio_summary(sections["show advanced 802.11a summary"]["output"]).items():
+                    ap_row(ap_name)["radio_mac_5ghz"] = mac
             data["aps"].extend(ap_rows.values())
         if "show interfaces status" in sections:
             data["interfaces"].extend(parse_interface_status(sections["show interfaces status"]["output"], hostname, result.host))
@@ -583,13 +660,15 @@ def create_technical_review_workbook(job_dir: Path, results: list[DeviceResult])
     ]), [22, 24, 18, 18, 30, 20, 20, 18, 12, 12, 20, 30, 35])
     writer.add_sheet("AP Info", rows_for_sheet(data["aps"], [
         ("controller", "Controller"), ("controller_ip", "Controller IP"), ("hostname", "AP Hostname"),
-        ("mac_address", "MAC Address"), ("ip_address", "IP Address"), ("serial_number", "Serial Number"),
+        ("mac_address", "MAC Address"), ("radio_mac_24ghz", "Radio MAC (2.4GHz)"), ("radio_mac_5ghz", "Radio MAC (5GHz)"),
+        ("radio_mac", "Radio MAC (Base, C9800)"),
+        ("ip_address", "IP Address"), ("serial_number", "Serial Number"),
         ("model", "Model"), ("software_version", "Software Version"), ("location", "Location"),
         ("site_tag", "Site Tag"), ("policy_tag", "Policy Tag"), ("rf_tag", "RF Tag"),
         ("country", "Country"), ("state", "State"), ("uptime", "Uptime"), ("join_time", "Join Time"),
         ("primary_controller", "Primary Controller"), ("secondary_controller", "Secondary Controller"),
         ("neighbor_name", "Neighbor Switch"), ("neighbor_ip", "Neighbor Switch IP"), ("neighbor_port", "Neighbor Port"),
-    ]), [24, 18, 26, 20, 18, 20, 18, 18, 28, 24, 24, 24, 14, 16, 22, 24, 24, 24, 26, 20, 20])
+    ]), [24, 18, 26, 20, 20, 20, 22, 18, 20, 18, 18, 28, 24, 24, 24, 14, 16, 22, 24, 24, 24, 26, 20, 20])
     writer.add_sheet("Interfaces", rows_for_sheet(data["interfaces"], [
         ("device", "Device"), ("management_ip", "Management IP"), ("interface", "Interface"),
         ("description", "Description"), ("status", "Status"), ("protocol", "Protocol"),

@@ -291,6 +291,8 @@ def parse_ap_names(show_ap_summary: str) -> list[str]:
         lowered = line.lower()
         if lowered.startswith(("number of aps", "ap name", "ap-name", "name ", "mac address")):
             continue
+        if re.match(r"^[A-Za-z]{1,4}\s*=\s*\S", line):
+            continue  # a legend line, e.g. 'CC = Country Code' / 'RD = Regulatory Domain'
         token = line.split()[0]
         if token.lower() in {"ap", "name", "slot", "mac"}:
             continue
@@ -355,6 +357,35 @@ def parse_aireos_ap_cdp_neighbors(output: str) -> list[dict[str, str]]:
             "neighbor_port": neighbor_port, "neighbor_ip": neighbor_ip,
         })
         i += 1
+    return rows
+
+
+def parse_aireos_radio_summary(output: str) -> dict[str, str]:
+    """Parses AireOS `show advanced 802.11a summary` / `show advanced
+    802.11b summary` output into {ap_name: radio_mac}. Both commands share
+    the same column layout (AP Name, MAC Address, Slot, Admin, Oper,
+    Channel, TxPower, BSS Color) - confirmed against a real 5520 capture
+    (256 APs) for the 802.11b/2.4GHz case; 802.11a/5GHz uses the identical
+    format for the other band. If an AP appears more than once (a
+    tri-radio AP with two 5GHz-capable slots), only the first occurrence
+    is kept - the common dual-radio case is unaffected."""
+    rows: dict[str, str] = {}
+    started = False
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not started:
+            if stripped and not (set(stripped.replace(" ", "")) - {"-"}):
+                started = True
+            continue
+        if not stripped:
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        ap_name, mac = parts[0], parts[1]
+        if not re.fullmatch(r"[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}", mac):
+            continue
+        rows.setdefault(ap_name, mac.lower())
     return rows
 
 
