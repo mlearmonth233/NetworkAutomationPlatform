@@ -194,15 +194,114 @@ def parse_arp(output: str, device: str, management_ip: str) -> list[dict[str, An
     return rows
 
 
-def parse_routes(output: str, device: str, management_ip: str) -> list[dict[str, Any]]:
+def parse_mac_table(output: str, device: str, management_ip: str) -> list[dict[str, Any]]:
+    """Parses `show mac address-table` / `show mac-address-table` output.
+    Written to handle both the IOS/IOS-XE layout (Vlan/Mac Address/Type/Ports)
+    and the NX-OS layout (which adds a '*'/'G' primary-entry marker prefix
+    and extra age/Secure/NTFY columns before Ports) with one pattern, since
+    a MAC address and the dynamic/static keyword are distinctive enough
+    anchors regardless of how many columns sit between them and the port
+    field at the end of the line. A static entry mapped to several ports at
+    once (e.g. a multicast MAC) is expanded into one row per port so the
+    sheet stays a simple one-MAC-to-one-port lookup."""
     rows: list[dict[str, Any]] = []
+    pattern = re.compile(
+        r"^\**\s*[A-Za-z]?\s*(\d+)\s+([0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\.[0-9a-fA-F]{4})\s+"
+        r"(dynamic|static|self)\b.*?\s(\S+)\s*$",
+        re.IGNORECASE,
+    )
     for line in output.splitlines():
-        # Useful default-route and route-table records without attempting a full IOS parser.
-        match = re.match(r"^\s*([A-Z*]+)\s+(\S+)(?:\s+\[[^\]]+\])?\s+via\s+(\S+)(?:,\s*([^,]+))?(?:,\s*(\S+))?", line)
-        if match:
-            rows.append({"device": device, "management_ip": management_ip, "code": match.group(1),
-                         "prefix": match.group(2), "next_hop": match.group(3), "age": (match.group(4) or "").strip(),
-                         "interface": (match.group(5) or "").strip()})
+        match = pattern.match(line.strip())
+        if not match:
+            continue
+        vlan, mac, entry_type, ports = match.group(1), match.group(2), match.group(3).upper(), match.group(4)
+        for port in ports.split(","):
+            port = port.strip()
+            if port:
+                rows.append({
+                    "device": device, "management_ip": management_ip, "vlan": vlan,
+                    "mac_address": normalise_mac(mac), "type": entry_type, "port": port,
+                })
+    return rows
+
+
+_ROUTE_AGE_PATTERN = re.compile(r"^(\d+w\d+d|\d+d\d+h|\d\d:\d\d:\d\d|\d+h\d+m|never)$")
+
+
+def _finalize_route_via(code: str, prefix: str, rest: str, device: str, management_ip: str) -> dict[str, Any] | None:
+    match = re.search(r"via\s+(\d+\.\d+\.\d+\.\d+)\s*,?\s*(.*)$", rest.strip())
+    if not match:
+        return None
+    next_hop = match.group(1)
+    tail_parts = [part.strip() for part in match.group(2).split(",") if part.strip()]
+    age = interface = ""
+    if len(tail_parts) >= 2:
+        age, interface = tail_parts[0], tail_parts[1]
+    elif len(tail_parts) == 1:
+        # A lone trailing field could be either the age or the interface
+        # (e.g. a static route configured with just an exit interface and no
+        # age at all) - distinguish by shape rather than assuming position.
+        if _ROUTE_AGE_PATTERN.match(tail_parts[0]):
+            age = tail_parts[0]
+        else:
+            interface = tail_parts[0]
+    return {
+        "device": device, "management_ip": management_ip, "code": code, "prefix": prefix,
+        "next_hop": next_hop, "age": age, "interface": interface,
+        "is_default": prefix == "0.0.0.0/0" or "*" in code,
+    }
+
+
+def parse_routes(output: str, device: str, management_ip: str) -> list[dict[str, Any]]:
+    """Parses IOS/IOS-XE `show ip route` output. Handles the three shapes a
+    route entry can take: connected/local routes (no via-clause at all, just
+    'is directly connected'), a single line with the via-clause included,
+    and a two-line wrap (code+prefix on one line, the via-clause on the
+    next) which IOS uses for longer multi-letter codes like 'D EX'/'O E2'
+    and for additional equal-cost paths. Confirmed against constructed
+    samples covering all of these; NX-OS uses a structurally different
+    format ('*via ... protocol-name' with no leading code letter) not
+    covered here."""
+    rows: list[dict[str, Any]] = []
+    pending: tuple[str, str] | None = None
+
+    for raw_line in output.splitlines():
+        line = raw_line.rstrip("\n")
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        connected = re.match(r"^([A-Za-z*]+(?:\s[A-Za-z0-9]+)?)\s+(\S+)\s+is directly connected,\s*(\S+)", line)
+        if connected:
+            code, prefix, interface = connected.group(1), connected.group(2), connected.group(3)
+            rows.append({
+                "device": device, "management_ip": management_ip, "code": code, "prefix": prefix,
+                "next_hop": "", "age": "", "interface": interface,
+                "is_default": prefix == "0.0.0.0/0" or "*" in code,
+            })
+            pending = None
+            continue
+
+        headed = re.match(r"^([A-Za-z*]+(?:\s[A-Za-z0-9]+)?)\s+(\d+\.\d+\.\d+\.\d+(?:/\d+)?)\s*(.*)$", line)
+        if headed and not re.search(r"is variably subnetted|is subnetted", line):
+            code, prefix, rest = headed.group(1), headed.group(2), headed.group(3).strip()
+            if rest:
+                row = _finalize_route_via(code, prefix, rest, device, management_ip)
+                if row:
+                    rows.append(row)
+                    pending = (code, prefix)  # further via-only lines may follow (ECMP)
+                    continue
+            pending = (code, prefix)  # no via on this line - expect it on the next
+            continue
+
+        if pending and re.match(r"^\s*(?:\[[^\]]+\]\s*)?via\s+\S+", line):
+            code, prefix = pending
+            row = _finalize_route_via(code, prefix, stripped, device, management_ip)
+            if row:
+                rows.append(row)
+            continue
+
+        pending = None  # banner text, subnet-summary lines, etc. reset context
     return rows
 
 
@@ -211,15 +310,30 @@ def parse_port_channels(output: str, device: str, management_ip: str) -> list[di
     for line in output.splitlines():
         match = re.match(r"^\s*(\d+)\s+(Po\d+\([^)]*\))\s+(\S+)\s+(.+)$", line)
         if match:
-            rows.append({"device": device, "management_ip": management_ip, "group": int(match.group(1)),
-                         "port_channel": match.group(2), "protocol": match.group(3), "member_ports": match.group(4).strip()})
+            port_channel = match.group(2)
+            member_ports = match.group(4).strip()
+            # The aggregate's own flag can be a combo like "(SD)" (Layer2 +
+            # Down) - a bare uppercase D anywhere in it means the whole
+            # port-channel is down. Each member's flag is always a single
+            # character, so "(D)" there means specifically that one link is
+            # down (Cisco's legend uses lowercase for unrelated states like
+            # 's' suspended or 'd' default-port, so this is deliberately
+            # case-sensitive and exact for members).
+            aggregate_flag = re.search(r"\(([^)]*)\)", port_channel)
+            aggregate_down = bool(aggregate_flag and "D" in aggregate_flag.group(1))
+            member_down = "(D)" in member_ports
+            rows.append({
+                "device": device, "management_ip": management_ip, "group": int(match.group(1)),
+                "port_channel": port_channel, "protocol": match.group(3), "member_ports": member_ports,
+                "has_down_link": aggregate_down or member_down,
+            })
     return rows
 
 
 def collect_report_data(results: list[DeviceResult]) -> dict[str, list[dict[str, Any]]]:
     data: dict[str, list[dict[str, Any]]] = {
         "devices": [], "aps": [], "interfaces": [], "vlans": [], "neighbors": [],
-        "port_channels": [], "routes": [], "arp": [], "inventory": [], "commands": [], "log_alerts": [],
+        "port_channels": [], "routes": [], "arp": [], "mac_table": [], "inventory": [], "commands": [], "log_alerts": [],
     }
     for result in sorted(results, key=lambda row: row.index):
         data["devices"].append({
@@ -316,9 +430,15 @@ def collect_report_data(results: list[DeviceResult]) -> dict[str, list[dict[str,
             data["inventory"].extend(parse_inventory(sections["show inventory"]["output"], hostname, result.host))
         if "show ip arp" in sections:
             data["arp"].extend(parse_arp(sections["show ip arp"]["output"], hostname, result.host))
-        for command in ("show ip route 0.0.0.0", "show ip route summary"):
+        for command in ("show mac address-table", "show mac-address-table"):
             if command in sections:
-                data["routes"].extend(parse_routes(sections[command]["output"], hostname, result.host))
+                data["mac_table"].extend(parse_mac_table(sections[command]["output"], hostname, result.host))
+        if "show ip route" in sections:
+            data["routes"].extend(parse_routes(sections["show ip route"]["output"], hostname, result.host))
+        else:
+            for command in ("show ip route 0.0.0.0", "show ip route summary"):
+                if command in sections:
+                    data["routes"].extend(parse_routes(sections[command]["output"], hostname, result.host))
         for command in ("show etherchannel summary", "show port-channel summary"):
             if command in sections:
                 data["port_channels"].extend(parse_port_channels(sections[command]["output"], hostname, result.host))
@@ -329,11 +449,11 @@ def collect_report_data(results: list[DeviceResult]) -> dict[str, list[dict[str,
 # avoiding a heavyweight spreadsheet dependency in the local collector.
 class SimpleXlsxWriter:
     def __init__(self) -> None:
-        self.sheets: list[tuple[str, list[list[Any]], list[int]]] = []
+        self.sheets: list[tuple[str, list[list[Any]], list[int], set[int]]] = []
 
-    def add_sheet(self, name: str, rows: list[list[Any]], widths: list[int] | None = None) -> None:
+    def add_sheet(self, name: str, rows: list[list[Any]], widths: list[int] | None = None, highlight_rows: set[int] | None = None) -> None:
         safe = re.sub(r"[\\/*?:\[\]]", "-", name)[:31] or "Sheet"
-        self.sheets.append((safe, rows, widths or []))
+        self.sheets.append((safe, rows, widths or [], highlight_rows or set()))
 
     @staticmethod
     def _col_name(index: int) -> str:
@@ -355,7 +475,8 @@ class SimpleXlsxWriter:
         text = html.escape(str(value), quote=False)
         return f'<c r="{ref}" s="{style}" t="inlineStr"><is><t xml:space="preserve">{text}</t></is></c>'
 
-    def _sheet_xml(self, rows: list[list[Any]], widths: list[int]) -> bytes:
+    def _sheet_xml(self, rows: list[list[Any]], widths: list[int], highlight_rows: set[int] | None = None) -> bytes:
+        highlight_rows = highlight_rows or set()
         max_cols = max((len(r) for r in rows), default=1)
         max_rows = max(len(rows), 1)
         cols = ""
@@ -364,7 +485,13 @@ class SimpleXlsxWriter:
             cols += f'<col min="{idx + 1}" max="{idx + 1}" width="{max(8, min(width, 45))}" customWidth="1"/>'
         sheet_rows: list[str] = []
         for r_idx, row in enumerate(rows, start=1):
-            cells = "".join(self._cell(f"{self._col_name(c_idx)}{r_idx}", value, 1 if r_idx == 1 else 0)
+            if r_idx == 1:
+                style = 1  # header
+            elif (r_idx - 2) in highlight_rows:  # r_idx-2 converts back to the 0-based data-row index
+                style = 2  # highlighted (e.g. a port channel with a down link)
+            else:
+                style = 0  # normal
+            cells = "".join(self._cell(f"{self._col_name(c_idx)}{r_idx}", value, style)
                             for c_idx, value in enumerate(row))
             sheet_rows.append(f'<row r="{r_idx}" ht="{24 if r_idx == 1 else 18}" customHeight="1">{cells}</row>')
         last = f"{self._col_name(max_cols - 1)}{max_rows}"
@@ -382,7 +509,7 @@ class SimpleXlsxWriter:
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         sheet_entries = "".join(f'<sheet name="{html.escape(name, quote=True)}" sheetId="{idx}" r:id="rId{idx}"/>'
-                                for idx, (name, _, _) in enumerate(self.sheets, start=1))
+                                for idx, (name, _, _, _) in enumerate(self.sheets, start=1))
         rels = "".join(f'<Relationship Id="rId{idx}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{idx}.xml"/>'
                        for idx in range(1, len(self.sheets) + 1))
         rels += f'<Relationship Id="rId{len(self.sheets)+1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
@@ -392,10 +519,10 @@ class SimpleXlsxWriter:
         styles = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
 <fonts count="2"><font><sz val="10"/><name val="Aptos"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="10"/><name val="Aptos"/></font></fonts>
-<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF17365D"/><bgColor indexed="64"/></patternFill></fill></fills>
+<fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF17365D"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFDE2E1"/><bgColor indexed="64"/></patternFill></fill></fills>
 <borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border><border><left style="thin"><color rgb="FFD9E2F3"/></left><right style="thin"><color rgb="FFD9E2F3"/></right><top style="thin"><color rgb="FFD9E2F3"/></top><bottom style="thin"><color rgb="FFD9E2F3"/></bottom><diagonal/></border></borders>
 <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf></cellXfs>
+<cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf><xf numFmtId="0" fontId="0" fillId="3" borderId="1" xfId="0" applyFill="1" applyBorder="1"/></cellXfs>
 <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>'''
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -411,9 +538,9 @@ class SimpleXlsxWriter:
             archive.writestr("xl/_rels/workbook.xml.rels", f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{rels}</Relationships>''')
             archive.writestr("xl/styles.xml", styles)
             archive.writestr("docProps/core.xml", f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>Network Technical Review</dc:title><dc:creator>Catalyst Config Collector</dc:creator><dcterms:created xsi:type="dcterms:W3CDTF">{created}</dcterms:created></cp:coreProperties>''')
-            archive.writestr("docProps/app.xml", f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>Catalyst Config Collector</Application><TitlesOfParts><vt:vector size="{len(self.sheets)}" baseType="lpstr">{''.join(f'<vt:lpstr>{html.escape(name)}</vt:lpstr>' for name,_,_ in self.sheets)}</vt:vector></TitlesOfParts></Properties>''')
-            for idx, (_, rows, widths) in enumerate(self.sheets, start=1):
-                archive.writestr(f"xl/worksheets/sheet{idx}.xml", self._sheet_xml(rows, widths))
+            archive.writestr("docProps/app.xml", f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>Catalyst Config Collector</Application><TitlesOfParts><vt:vector size="{len(self.sheets)}" baseType="lpstr">{''.join(f'<vt:lpstr>{html.escape(name)}</vt:lpstr>' for name,_,_,_ in self.sheets)}</vt:vector></TitlesOfParts></Properties>''')
+            for idx, (_, rows, widths, highlight_rows) in enumerate(self.sheets, start=1):
+                archive.writestr(f"xl/worksheets/sheet{idx}.xml", self._sheet_xml(rows, widths, highlight_rows))
 
 
 def rows_for_sheet(records: list[dict[str, Any]], columns: list[tuple[str, str]]) -> list[list[Any]]:
@@ -440,6 +567,7 @@ def create_technical_review_workbook(job_dir: Path, results: list[DeviceResult])
         ["Neighbours parsed", len(data["neighbors"])],
         ["Inventory components", len(data["inventory"])],
         ["ARP entries", len(data["arp"])],
+        ["MAC address table entries", len(data["mac_table"])],
         ["Commands recorded", len(data["commands"])],
         ["Log alerts detected", len(data["log_alerts"])],
         [],
@@ -477,18 +605,26 @@ def create_technical_review_workbook(job_dir: Path, results: list[DeviceResult])
         ("neighbor", "Neighbour"), ("neighbor_ip", "Neighbour IP"), ("local_interface", "Local Interface"),
         ("remote_interface", "Remote Interface"), ("platform", "Platform"),
     ]), [24, 18, 12, 30, 18, 20, 24, 24])
+    port_channel_highlight_rows = {i for i, record in enumerate(data["port_channels"]) if record.get("has_down_link")}
     writer.add_sheet("Port Channels", rows_for_sheet(data["port_channels"], [
         ("device", "Device"), ("management_ip", "Management IP"), ("group", "Group"),
         ("port_channel", "Port Channel"), ("protocol", "Protocol"), ("member_ports", "Member Ports"),
-    ]), [24, 18, 10, 18, 14, 50])
+        ("has_down_link", "Down Link?"),
+    ]), [24, 18, 10, 18, 14, 50, 12], highlight_rows=port_channel_highlight_rows)
+    route_highlight_rows = {i for i, record in enumerate(data["routes"]) if record.get("is_default")}
     writer.add_sheet("Routes", rows_for_sheet(data["routes"], [
         ("device", "Device"), ("management_ip", "Management IP"), ("code", "Route Code"),
         ("prefix", "Prefix"), ("next_hop", "Next Hop"), ("age", "Age"), ("interface", "Interface"),
-    ]), [24, 18, 14, 22, 18, 16, 20])
+        ("is_default", "Default Route?"),
+    ]), [24, 18, 14, 22, 18, 16, 20, 14], highlight_rows=route_highlight_rows)
     writer.add_sheet("ARP", rows_for_sheet(data["arp"], [
         ("device", "Device"), ("management_ip", "Management IP"), ("ip_address", "IP Address"),
         ("mac_address", "MAC Address"), ("age", "Age"), ("type", "Type"), ("interface", "Interface"),
     ]), [24, 18, 18, 20, 10, 12, 20])
+    writer.add_sheet("MAC Table", rows_for_sheet(data["mac_table"], [
+        ("device", "Device"), ("management_ip", "Management IP"), ("vlan", "VLAN"),
+        ("mac_address", "MAC Address"), ("type", "Type"), ("port", "Port"),
+    ]), [24, 18, 10, 20, 12, 20])
     writer.add_sheet("Hardware Inventory", rows_for_sheet(data["inventory"], [
         ("device", "Device"), ("management_ip", "Management IP"), ("name", "Component Name"),
         ("description", "Description"), ("pid", "Product ID"), ("vid", "Version ID"),

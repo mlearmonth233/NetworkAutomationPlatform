@@ -77,6 +77,7 @@ BASE_COMMANDS = [
     "show spanning-tree",
     "show spanning-tree blockedports",
     "show ip arp",
+    "show ip route",
     "show ip route summary",
     "show ip route 0.0.0.0",
     "show ip eigrp neighbors",
@@ -139,6 +140,23 @@ AIREOS_COMMANDS: list[tuple[str, int]] = [
     # manually-interrupted or otherwise cut-short session still collects
     # everything else first rather than losing it all behind this one.
     ("show run-config", 1200),
+]
+
+# Confirmed from a real APC AOS (Network Management Card) SSH session on a
+# switched PDU. The user's original list had console/web/ntp repeated at the
+# end (matching the real capture exactly) - deduplicated here since running
+# the same read-only command twice adds nothing.
+APC_COMMANDS: list[tuple[str, int]] = [
+    ("user", 60),
+    ("web", 60),
+    ("console", 60),
+    ("ftp", 60),
+    ("ntp", 60),
+    ("snmp", 60),
+    ("snmpv3", 60),
+    ("tcpip", 60),
+    ("date", 60),
+    ("olStatus all", 60),
 ]
 
 INVALID_PATTERNS = (
@@ -386,6 +404,50 @@ def parse_aireos_ap_inventory(output: str) -> list[dict[str, str]]:
     return rows
 
 
+def parse_apc_about(output: str) -> dict[str, str]:
+    """Parses APC AOS `about` output. Only the first 'Hardware Factory'
+    block is the PDU itself - the 'Network Management Card' block that
+    follows is the separate management card, with its own PID/SN. Confirmed
+    against a real Schneider Electric AOS v7.1.2 / RPDU 2g APP v7.1.3
+    session."""
+    block_match = re.search(r"Hardware Factory\s*\n-+\s*\n(.*?)(?:\n\n|\nNetwork Management Card)", output, re.DOTALL)
+    block = block_match.group(1) if block_match else output
+    model = re.search(r"Model Number:\s*(\S+)", block)
+    serial = re.search(r"Serial Number:\s*(\S+)", block)
+    mac = re.search(r"MAC Address:\s*([0-9A-Fa-f ]{17})", block)
+    return {
+        "model": model.group(1) if model else "",
+        "serial_number": serial.group(1) if serial else "",
+        "mac_address": mac.group(1).strip().replace(" ", ":").lower() if mac else "",
+    }
+
+
+def parse_apc_system(output: str) -> dict[str, str]:
+    """Parses APC AOS `system` output for identifying fields. Confirmed
+    against a real session."""
+    name = re.search(r"^Name:\s*(\S+)", output, re.MULTILINE)
+    contact = re.search(r"^Contact:\s*(.+)$", output, re.MULTILINE)
+    location = re.search(r"^Location:\s*(.+)$", output, re.MULTILINE)
+    return {
+        "hostname": name.group(1) if name else "",
+        "contact": contact.group(1).strip() if contact else "",
+        "location": location.group(1).strip() if location else "",
+    }
+
+
+def parse_apc_outlet_status(output: str) -> list[dict[str, str]]:
+    """Parses APC AOS `olStatus all` output - one row per switched outlet
+    with its assigned name and On/Off state. Confirmed against a real
+    session (outlet names there followed a '<device>_PWR-<feed>' naming
+    convention, e.g. 'SWC001_PWR-B')."""
+    rows: list[dict[str, str]] = []
+    for line in output.splitlines():
+        match = re.match(r"\s*(\d+):\s*(\S+):\s*(On|Off)\s*$", line)
+        if match:
+            rows.append({"outlet": match.group(1), "name": match.group(2), "status": match.group(3)})
+    return rows
+
+
 def unique_log_path(job_dir: Path, hostname: str, host: str) -> Path:
     candidate = job_dir / f"{safe_name(hostname)}.log"
     if not candidate.exists():
@@ -521,6 +583,54 @@ def collect_one(
             if custom_commands:
                 commands.extend((command, 600) for command in custom_commands)
             seen: set[str] = {"show sysinfo", "show inventory"}
+        elif device.device_type == "generic_termserver":
+            # APC AOS (Network Management Card) switched PDU. Like AireOS,
+            # this has no privileged/enable mode at all - confirmed directly
+            # from a real session (no enable-mode transition anywhere in
+            # the captured CLI). No pagination workaround either - none was
+            # observed for any command in that same real capture.
+            attempted = successful = failed = 0
+            notify({"type": "log", "message": f"{device.name}: collecting about"})
+            about_output, about_status = run_command(connection, "about", 60)
+            attempted += 1
+            successful += about_status == "SUCCESS"
+            failed += about_status != "SUCCESS"
+
+            notify({"type": "log", "message": f"{device.name}: collecting system"})
+            system_output, system_status = run_command(connection, "system", 60)
+            attempted += 1
+            successful += system_status == "SUCCESS"
+            failed += system_status != "SUCCESS"
+
+            about_details = parse_apc_about(about_output)
+            system_details = parse_apc_system(system_output)
+            result.model = about_details["model"]
+            result.serial_number = about_details["serial_number"]
+            result.platform = "APC PDU (AOS)"
+            hostname = system_details["hostname"] or device.name
+            result.detected_hostname = hostname
+            result.status = "COLLECTING"
+            notify({"type": "device_update", "result": asdict(result)})
+
+            parts = [
+                "=" * 96,
+                "NETWORK DEVICE COLLECTION LOG",
+                "=" * 96,
+                f"Inventory name : {device.name}",
+                f"Management IP  : {device.host}",
+                f"Detected host  : {hostname}",
+                f"Collected      : {datetime.now().astimezone().isoformat()}",
+                "=" * 96,
+                "",
+                "",
+            ]
+            append_section(parts, "about", about_output, about_status)
+            append_section(parts, "system", system_output, system_status)
+
+            commands = list(APC_COMMANDS)
+            if custom_commands:
+                commands.extend((command, 600) for command in custom_commands)
+            seen = {"about", "system"}
         else:
             if not connection.check_enable_mode():
                 connection.enable()
