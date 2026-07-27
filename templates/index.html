@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Network Automation Studio</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand-mark">NA</div>
+      <div class="brand-copy">
+        <strong>Network Automation Studio</strong>
+        <span>Collection, review and automation</span>
+      </div>
+      <nav>
+        <button id="nav-collector" class="nav-item active" type="button">Collector</button>
+        <button id="nav-profiles" class="nav-item" type="button">Command Profiles</button>
+        <button id="nav-network-tools" class="nav-item" type="button">Ping &amp; DNS Checker</button>
+        <button id="nav-history" class="nav-item" type="button">History</button>
+        <button class="nav-item" disabled>Compliance</button>
+      </nav>
+      <div class="sidebar-note">
+        <strong>Read-only MVP</strong>
+        <span>This release does not enter configuration mode or save changes.</span>
+      </div>
+    </aside>
+
+    <main>
+      <div id="collector-view" class="app-view">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">NETWORK AUTOMATION</p>
+          <h1>Network Config Collector</h1>
+          <p class="subtitle">Collect Cisco network data, analyse device logs and create a technical-review workbook.</p>
+        </div>
+        <div class="status-pill"><span class="dot"></span> Local runner</div>
+      </header>
+
+      <section class="grid-two">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <p class="step">STEP 1</p>
+              <h2>Add devices</h2>
+            </div>
+            <span id="device-count" class="badge">0 devices</span>
+          </div>
+
+          <div class="button-row">
+            <label class="button secondary file-button">
+              Upload CSV
+              <input id="csv-file" type="file" accept=".csv,text/csv" hidden>
+            </label>
+            <button id="add-device" class="button secondary" type="button">Add device</button>
+            <button id="paste-devices" class="button secondary" type="button">Paste list</button>
+            <button id="load-example" class="button ghost" type="button">Load example</button>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Name</th><th>IP / Host</th><th>Port</th><th>Device Type</th><th></th></tr></thead>
+              <tbody id="device-body"></tbody>
+            </table>
+          </div>
+          <p class="help">CSV columns: <code>name,host,port,device_type</code>. Only name and host are required.</p>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <p class="step">STEP 2</p>
+              <h2>Credentials</h2>
+            </div>
+            <span class="badge secure">Session only</span>
+          </div>
+          <div class="form-grid">
+            <label>SSH username<input id="username" autocomplete="username" placeholder="automation-user"></label>
+            <label>SSH password<input id="password" type="password" autocomplete="current-password" placeholder="••••••••••"></label>
+            <label class="full">Enable secret<input id="enable-secret" type="password" placeholder="Leave blank if the SSH password is also the enable secret"></label>
+          </div>
+          <div class="security-note">Credentials are held in application memory only for the active collection job and are not written to disk.</div>
+        </div>
+      </section>
+
+      <section class="card options-card">
+        <div class="card-header">
+          <div><p class="step">STEP 3</p><h2>Start collection</h2></div>
+          <span class="badge">Automatic platform profile</span>
+        </div>
+        <p class="subtitle">Core commands are selected automatically after platform detection. Review them or add read-only commands from the Command Profiles page.</p>
+        <div class="concurrency-row">
+          <label for="concurrent-devices"><strong>Concurrent collectors</strong><span>Authenticated devices can collect commands in parallel.</span></label>
+          <select id="concurrent-devices">
+            <option value="1">1 — Sequential collection</option><option value="3">3 — Conservative</option>
+            <option value="5" selected>5 — Recommended</option><option value="10">10 — Fast</option><option value="20">20 — Advanced</option>
+          </select>
+        </div>
+        <div class="concurrency-row">
+          <label for="sequential-authentication"><strong>PingID / MFA authentication mode</strong><span>Authenticate one device at a time, then continue collection in parallel.</span></label>
+          <input id="sequential-authentication" type="checkbox" checked style="width:22px;height:22px">
+        </div>
+        <div class="concurrency-row">
+          <label for="auth-timeout"><strong>Authentication timeout</strong><span>Allow enough time to approve the PingID prompt.</span></label>
+          <select id="auth-timeout">
+            <option value="60">60 seconds</option><option value="120">120 seconds</option>
+            <option value="180" selected>180 seconds — Recommended</option><option value="300">300 seconds</option>
+          </select>
+        </div>
+        <div class="launch-row">
+          <div><strong>Ready to collect</strong><span>Full Catalyst, Nexus or C9800 data is selected behind the scenes.</span></div>
+          <button id="start-job" class="button primary" type="button">Start collection</button>
+        </div>
+      </section>
+
+      <section id="progress-card" class="card hidden">
+        <div class="card-header">
+          <div><p class="step">LIVE JOB</p><h2>Collection progress</h2></div>
+          <div class="job-state-group">
+            <span id="connection-status" class="badge warning hidden">Reconnecting…</span>
+            <span id="job-state" class="badge">Starting</span>
+            <button id="cancel-job" class="button danger hidden" type="button">Cancel job</button>
+          </div>
+        </div>
+        <div class="summary-grid">
+          <div><span>Progress</span><strong id="progress-number">0 / 0</strong></div>
+          <div><span>Successful</span><strong id="success-number">0</strong></div>
+          <div><span>Failed</span><strong id="failed-number">0</strong></div>
+        </div>
+        <div class="progress-track"><div id="progress-bar"></div></div>
+        <div id="log-alert-banner" class="log-alert-banner hidden"><strong>Potential device issues detected</strong><span id="log-alert-text"></span></div>
+        <div class="job-grid">
+          <div class="table-wrap result-table"><table><thead><tr><th>Device</th><th>Host</th><th>Model</th><th>Version</th><th>Log Health</th><th>Status</th></tr></thead><tbody id="result-body"></tbody></table></div>
+          <div class="log-panel"><div class="log-title">Live log</div><pre id="live-log"></pre></div>
+        </div>
+        <div id="download-row" class="download-row hidden">
+          <button id="download-zip" class="button primary">Download consolidated logs</button>
+          <button id="download-xlsx" class="button secondary">Download technical review workbook</button>
+          <button id="download-csv" class="button secondary">Download results CSV</button>
+          <button id="view-configs" class="button secondary">View collected files</button>
+          <button id="retry-failed" class="button ghost">Retry failed / cancelled</button>
+        </div>
+      </section>
+      </div>
+
+      <div id="profiles-view" class="app-view hidden">
+        <header class="topbar"><div><p class="eyebrow">COLLECTION ENGINE</p><h1>Command Profiles</h1><p class="subtitle">Review the built-in read-only commands and add your own commands to every collection.</p></div><div class="status-pill"><span class="dot"></span> Read-only</div></header>
+        <section class="card">
+          <div class="card-header"><div><p class="step">CORE COMMANDS</p><h2>Automatic platform profiles</h2></div><span class="badge">Maintained by application</span></div>
+          <div class="profile-tabs"><button class="button secondary profile-tab active" data-profile="catalyst">Cisco Catalyst / IOS-XE</button><button class="button secondary profile-tab" data-profile="wlc">Cisco 9800 WLC</button><button class="button secondary profile-tab" data-profile="nexus">Cisco Nexus</button></div>
+          <pre id="core-command-list" class="command-list"></pre>
+        </section>
+        <section class="card">
+          <div class="card-header"><div><p class="step">CUSTOM COMMANDS</p><h2>Additional read-only commands</h2></div><span id="custom-command-count" class="badge">0 commands</span></div>
+          <p class="help">Enter one command per line. Only <code>show</code>, <code>sh</code> and <code>terminal</code> commands are accepted. These commands run after the core profile.</p>
+          <textarea id="custom-commands" rows="12" class="command-editor" placeholder="show authentication sessions
+show license summary
+show standby brief"></textarea>
+          <div class="button-row"><button id="save-custom-commands" class="button primary" type="button">Save commands</button><button id="clear-custom-commands" class="button secondary" type="button">Clear</button><button id="export-profile" class="button secondary" type="button">Export profile</button><label class="button secondary file-button">Import profile<input id="import-profile" type="file" accept=".json,application/json" hidden></label></div>
+          <div id="command-profile-message" class="security-note">Custom commands are stored in this browser and sent only with collection jobs.</div>
+        </section>
+      </div>
+
+      <div id="network-tools-view" class="app-view hidden">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">NETWORK TOOLS</p>
+            <h1>Bulk Ping &amp; DNS Checker</h1>
+            <p class="subtitle">A lightweight add-on for bulk reachability and name-resolution testing.</p>
+          </div>
+          <div class="status-pill"><span class="dot"></span> Local runner</div>
+        </header>
+
+        <section class="card network-tools-card">
+        <div class="card-header">
+          <div><p class="step">NETWORK TOOLS</p><h2>Bulk Ping &amp; DNS Checker</h2></div>
+          <span class="badge">Preserves input order</span>
+        </div>
+        <div class="network-tools-grid">
+          <div>
+            <label class="field-label" for="network-targets">IP addresses or hostnames</label>
+            <textarea id="network-targets" rows="10" placeholder="10.10.10.1&#10;USLIAP01SWA055&#10;switch01.company.local"></textarea>
+            <p class="help">Enter one target per line, or paste comma-separated values. Up to 1,000 targets per test.</p>
+          </div>
+          <div class="network-test-options">
+            <label>Ping timeout
+              <select id="ping-timeout">
+                <option value="1">1 second</option>
+                <option value="2" selected>2 seconds</option>
+                <option value="3">3 seconds</option>
+                <option value="5">5 seconds</option>
+                <option value="10">10 seconds</option>
+              </select>
+            </label>
+            <div class="tool-description">
+              <strong>Tests performed</strong>
+              <span>ICMP ping</span>
+              <span>Forward DNS lookup</span>
+              <span>Reverse DNS lookup</span>
+              <span>IPv4 and IPv6 resolution</span>
+            </div>
+            <button id="run-network-tests" class="button primary" type="button">Run bulk tests</button>
+            <button id="clear-network-tests" class="button secondary" type="button">Clear results</button>
+          </div>
+        </div>
+
+        <div id="network-test-progress" class="network-test-progress hidden">
+          <span class="spinner"></span>
+          <strong>Running ping and DNS checks…</strong>
+        </div>
+
+        <div id="network-results-section" class="hidden">
+          <div class="network-results-toolbar">
+            <div class="summary-inline">
+              <span><strong id="network-total">0</strong> tested</span>
+              <span><strong id="network-ping-success">0</strong> ping successful</span>
+              <span><strong id="network-dns-success">0</strong> DNS successful</span>
+            </div>
+            <button id="export-network-csv" class="button secondary" type="button">Export CSV</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>#</th><th>Input</th><th>Ping</th><th>Latency</th><th>Resolved IP</th><th>Reverse DNS</th><th>DNS</th><th>Details</th></tr></thead>
+              <tbody id="network-results-body"></tbody>
+            </table>
+          </div>
+        </div>
+        </section>
+
+      </div>
+
+      <div id="history-view" class="app-view hidden">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">PAST RUNS</p>
+            <h1>Job History</h1>
+            <p class="subtitle">Reopen a previous collection job, including ones from before this app was last restarted.</p>
+          </div>
+          <div class="status-pill"><span class="dot"></span> Local runner</div>
+        </header>
+        <section class="card">
+          <div class="card-header">
+            <div><p class="step">RECENT JOBS</p><h2>Collection jobs</h2></div>
+            <button id="refresh-history" class="button secondary" type="button">Refresh</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Started</th><th>Devices</th><th>Status</th><th>Successful</th><th>Failed</th><th>Cancelled</th><th></th></tr></thead>
+              <tbody id="history-body"></tbody>
+            </table>
+          </div>
+          <p id="history-empty" class="help hidden">No collection jobs yet. Start one from the Collector page.</p>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-header"><h3 id="modal-title">Add devices</h3><button id="modal-close">×</button></div>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
