@@ -767,11 +767,24 @@ def run_collection_job(
     cancel_event: threading.Event | None = None,
     active_connections: dict[int, Any] | None = None,
     connections_lock: threading.Lock | None = None,
+    retry_indices: set[int] | None = None,
+    existing_results: dict[int, DeviceResult] | None = None,
 ) -> None:
+    """retry_indices/existing_results let this re-run just a subset of a
+    previous job's devices (the ones that failed/were cancelled) while
+    keeping every other device's prior result intact in the final merged
+    output - so retrying a failed device never loses what already
+    succeeded. When retry_indices is None, every device is (re)collected,
+    matching the original full-job behavior."""
     job_dir = storage_root / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
     results_by_index: list[DeviceResult | None] = [None] * len(devices)
-    worker_count = max(1, min(int(concurrent_devices), 20, len(devices)))
+    collect_indices = retry_indices if retry_indices is not None else set(range(len(devices)))
+    if existing_results:
+        for index, prior in existing_results.items():
+            if index not in collect_indices:
+                results_by_index[index] = prior
+    worker_count = max(1, min(int(concurrent_devices), 20, len(collect_indices) or 1))
     authentication_lock = threading.Lock() if sequential_authentication else None
     if cancel_event is None:
         cancel_event = threading.Event()
@@ -780,6 +793,9 @@ def run_collection_job(
     if connections_lock is None:
         connections_lock = threading.Lock()
     notify({"type": "job_started", "total": len(devices), "concurrent_devices": worker_count})
+    kept_count = len(devices) - len(collect_indices)
+    if kept_count:
+        notify({"type": "log", "message": f"Keeping {kept_count} previously-collected device result(s); (re)collecting {len(collect_indices)}"})
     notify({"type": "log", "message": f"Starting collection with {worker_count} worker(s)"})
     if sequential_authentication:
         notify({"type": "log", "message": f"MFA mode enabled: SSH authentication is sequential; authenticated devices collect in parallel (authentication timeout {auth_timeout}s)"})
@@ -789,6 +805,8 @@ def run_collection_job(
     with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="device-collector") as executor:
         future_map = {}
         for index, device in enumerate(devices):
+            if index not in collect_indices:
+                continue
             notify({"type": "log", "message": f"Queued {device.name} ({device.host})"})
             future = executor.submit(
                 collect_one,
@@ -809,7 +827,20 @@ def run_collection_job(
             )
             future_map[future] = (index, device)
 
-        complete_count = 0
+        complete_count = sum(1 for item in results_by_index if item is not None)
+        total = len(devices)
+        if complete_count:
+            # Reflect the carried-over devices in progress immediately, rather
+            # than looking like the job is starting from zero.
+            kept = [item for item in results_by_index if item is not None]
+            notify({
+                "type": "progress", "complete": complete_count, "total": total,
+                "successful": sum(item.status == "SUCCESS" for item in kept),
+                "failed": sum(item.status == "FAILED" for item in kept),
+                "cancelled": sum(item.status == "CANCELLED" for item in kept),
+                "active": min(worker_count, len(collect_indices)),
+                "queued": max(0, len(collect_indices) - worker_count),
+            })
         for future in as_completed(future_map):
             index, device = future_map[future]
             try:
@@ -829,12 +860,12 @@ def run_collection_job(
             notify({
                 "type": "progress",
                 "complete": complete_count,
-                "total": len(devices),
+                "total": total,
                 "successful": sum(item.status == "SUCCESS" for item in completed),
                 "failed": sum(item.status == "FAILED" for item in completed),
                 "cancelled": sum(item.status == "CANCELLED" for item in completed),
-                "active": min(worker_count, len(devices) - complete_count),
-                "queued": max(0, len(devices) - complete_count - worker_count),
+                "active": min(worker_count, total - complete_count),
+                "queued": max(0, total - complete_count - worker_count),
             })
 
     results = [item for item in results_by_index if item is not None]

@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .collector import CollectionOptions, Device, run_collection_job
+from .collector import CollectionOptions, Device, DeviceResult, run_collection_job
 from .network_tools import run_bulk_tests
 from .r2o_check import run_r2o_check
 
@@ -157,9 +157,92 @@ def parse_devices(raw: str) -> list[Device]:
     return devices
 
 
+def parse_custom_commands(custom_commands_json: str) -> list[str]:
+    try:
+        custom_commands = json.loads(custom_commands_json)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid custom command data") from exc
+    if not isinstance(custom_commands, list):
+        raise HTTPException(status_code=400, detail="Custom commands must be a list")
+    cleaned_commands: list[str] = []
+    for value in custom_commands:
+        command = str(value).strip()
+        if not command:
+            continue
+        if not command.lower().startswith(("show ", "sh ", "terminal ")):
+            raise HTTPException(status_code=400, detail=f"Only read-only show commands are allowed: {command}")
+        if command not in cleaned_commands:
+            cleaned_commands.append(command)
+    if len(cleaned_commands) > 100:
+        raise HTTPException(status_code=400, detail="A maximum of 100 custom commands is allowed")
+    return cleaned_commands
+
+
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request) -> HTMLResponse:
     return templates.TemplateResponse("index.html", {"request": request})
+
+
+def _start_collection_thread(
+    job_id: str,
+    devices: list[Device],
+    username: str,
+    password: str,
+    enable_secret: str,
+    concurrent_devices: int,
+    custom_commands: list[str],
+    sequential_authentication: bool,
+    auth_timeout: int,
+    retry_indices: set[int] | None = None,
+    existing_results: dict[int, Any] | None = None,
+) -> None:
+    """Shared by create_job and the retry endpoint. When retry_indices is
+    given, only those device indices are actually (re)collected - every
+    other device's existing_results entry is carried through untouched into
+    the merged final output, so retrying a failed device never discards
+    what already succeeded."""
+    options = CollectionOptions()
+    cancel_event = threading.Event()
+    job_controls[job_id] = {
+        "cancel_event": cancel_event,
+        "active_connections": {},
+        "lock": threading.Lock(),
+    }
+
+    def complete(results, results_path: Path, workbook_path: Path, zip_path: Path, status: str) -> None:
+        jobs[job_id]["status"] = status
+        jobs[job_id]["completed_at"] = datetime.now().astimezone().isoformat()
+        jobs[job_id]["results"] = [asdict(item) for item in results]
+        jobs[job_id]["results_path"] = str(results_path)
+        jobs[job_id]["workbook_path"] = str(workbook_path)
+        jobs[job_id]["zip_path"] = str(zip_path)
+        write_job_meta(job_id)
+        job_controls.pop(job_id, None)
+
+    def worker() -> None:
+        jobs[job_id]["status"] = "RUNNING"
+        write_job_meta(job_id)
+        try:
+            run_collection_job(
+                job_id=job_id, devices=devices, username=username.strip(), password=password,
+                enable_secret=enable_secret, options=options, storage_root=STORAGE_ROOT,
+                notify=lambda event: publish(job_id, event), completion_callback=complete,
+                concurrent_devices=concurrent_devices, custom_commands=custom_commands,
+                sequential_authentication=sequential_authentication, auth_timeout=auth_timeout,
+                cancel_event=cancel_event,
+                active_connections=job_controls[job_id]["active_connections"],
+                connections_lock=job_controls[job_id]["lock"],
+                retry_indices=retry_indices, existing_results=existing_results,
+            )
+        except Exception as exc:
+            jobs[job_id]["status"] = "FAILED"
+            jobs[job_id]["completed_at"] = datetime.now().astimezone().isoformat()
+            write_job_meta(job_id)
+            job_controls.pop(job_id, None)
+            publish(job_id, {"type": "log", "message": f"Job failed unexpectedly: {type(exc).__name__}: {exc}"})
+            publish(job_id, {"type": "job_complete", "status": "FAILED", "successful": 0, "failed": len(devices), "cancelled": 0})
+
+    threading.Thread(target=worker, daemon=True, name=f"collector-{job_id[:8]}").start()
 
 
 @app.post("/api/jobs")
@@ -180,25 +263,8 @@ async def create_job(
         raise HTTPException(status_code=400, detail="Concurrent devices must be between 1 and 20")
     if not 30 <= auth_timeout <= 600:
         raise HTTPException(status_code=400, detail="Authentication timeout must be between 30 and 600 seconds")
-    try:
-        custom_commands = json.loads(custom_commands_json)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail="Invalid custom command data") from exc
-    if not isinstance(custom_commands, list):
-        raise HTTPException(status_code=400, detail="Custom commands must be a list")
-    cleaned_commands = []
-    for value in custom_commands:
-        command = str(value).strip()
-        if not command:
-            continue
-        if not command.lower().startswith(("show ", "sh ", "terminal ")):
-            raise HTTPException(status_code=400, detail=f"Only read-only show commands are allowed: {command}")
-        if command not in cleaned_commands:
-            cleaned_commands.append(command)
-    if len(cleaned_commands) > 100:
-        raise HTTPException(status_code=400, detail="A maximum of 100 custom commands is allowed")
+    cleaned_commands = parse_custom_commands(custom_commands_json)
 
-    options = CollectionOptions()
     job_id = uuid.uuid4().hex
     jobs[job_id] = {
         "id": job_id, "status": "QUEUED",
@@ -212,47 +278,12 @@ async def create_job(
         "custom_commands": cleaned_commands,
     }
     subscribers[job_id] = set()
-    cancel_event = threading.Event()
-    job_controls[job_id] = {
-        "cancel_event": cancel_event,
-        "active_connections": {},
-        "lock": threading.Lock(),
-    }
     write_job_meta(job_id)
 
-    def complete(results, results_path: Path, workbook_path: Path, zip_path: Path, status: str) -> None:
-        jobs[job_id]["status"] = status
-        jobs[job_id]["completed_at"] = datetime.now().astimezone().isoformat()
-        jobs[job_id]["results"] = [asdict(item) for item in results]
-        jobs[job_id]["results_path"] = str(results_path)
-        jobs[job_id]["workbook_path"] = str(workbook_path)
-        jobs[job_id]["zip_path"] = str(zip_path)
-        write_job_meta(job_id)
-        job_controls.pop(job_id, None)
-
-    def worker() -> None:
-        jobs[job_id]["status"] = "RUNNING"
-        write_job_meta(job_id)
-        try:
-            run_collection_job(
-                job_id=job_id, devices=devices, username=username.strip(), password=password,
-                enable_secret=enable_secret, options=options, storage_root=STORAGE_ROOT,
-                notify=lambda event: publish(job_id, event), completion_callback=complete,
-                concurrent_devices=concurrent_devices, custom_commands=cleaned_commands,
-                sequential_authentication=sequential_authentication, auth_timeout=auth_timeout,
-                cancel_event=cancel_event,
-                active_connections=job_controls[job_id]["active_connections"],
-                connections_lock=job_controls[job_id]["lock"],
-            )
-        except Exception as exc:
-            jobs[job_id]["status"] = "FAILED"
-            jobs[job_id]["completed_at"] = datetime.now().astimezone().isoformat()
-            write_job_meta(job_id)
-            job_controls.pop(job_id, None)
-            publish(job_id, {"type": "log", "message": f"Job failed unexpectedly: {type(exc).__name__}: {exc}"})
-            publish(job_id, {"type": "job_complete", "status": "FAILED", "successful": 0, "failed": len(devices), "cancelled": 0})
-
-    threading.Thread(target=worker, daemon=True, name=f"collector-{job_id[:8]}").start()
+    _start_collection_thread(
+        job_id, devices, username, password, enable_secret, concurrent_devices,
+        cleaned_commands, sequential_authentication, auth_timeout,
+    )
     return JSONResponse({"job_id": job_id})
 
 
@@ -288,6 +319,50 @@ async def cancel_job(job_id: str) -> JSONResponse:
             pass
     publish(job_id, {"type": "log", "message": "Cancellation requested by user - stopping remaining devices"})
     return JSONResponse({"status": "cancelling"})
+
+
+@app.post("/api/jobs/{job_id}/retry")
+async def retry_job(
+    job_id: str,
+    username: str = Form(...),
+    password: str = Form(...),
+    enable_secret: str = Form(""),
+) -> JSONResponse:
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] in ("QUEUED", "RUNNING"):
+        raise HTTPException(status_code=400, detail="Job is still running")
+    if not username.strip() or not password:
+        raise HTTPException(status_code=400, detail="Username and password are required")
+
+    devices = [Device(**item) for item in job.get("devices", [])]
+    if not devices:
+        raise HTTPException(status_code=400, detail="This job has no device list to retry")
+
+    existing_results: dict[int, Any] = {}
+    successful_indices: set[int] = set()
+    for item in job.get("results", []):
+        result = DeviceResult(**item)
+        existing_results[result.index] = result
+        if result.status == "SUCCESS":
+            successful_indices.add(result.index)
+    retry_indices = {i for i in range(len(devices)) if i not in successful_indices}
+    if not retry_indices:
+        raise HTTPException(status_code=400, detail="Every device in this job already succeeded - nothing to retry")
+
+    jobs[job_id]["status"] = "RUNNING"
+    write_job_meta(job_id)
+    subscribers.setdefault(job_id, set())
+    publish(job_id, {"type": "log", "message": f"Retrying {len(retry_indices)} device(s); {len(successful_indices)} already-successful device(s) will be kept as-is"})
+
+    _start_collection_thread(
+        job_id, devices, username, password, enable_secret,
+        job.get("concurrent_devices", 5), job.get("custom_commands", []),
+        job.get("sequential_authentication", True), job.get("auth_timeout", 180),
+        retry_indices=retry_indices, existing_results=existing_results,
+    )
+    return JSONResponse({"status": "retrying", "retrying_count": len(retry_indices), "kept_count": len(successful_indices)})
 
 
 @app.get("/api/jobs/{job_id}/download")

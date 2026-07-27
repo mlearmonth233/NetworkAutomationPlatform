@@ -206,7 +206,40 @@ function renderResults() {
 $('download-zip').onclick=()=>location.href=`/api/jobs/${state.jobId}/download`;
 $('download-xlsx').onclick=()=>location.href=`/api/jobs/${state.jobId}/technical-review.xlsx`;
 $('download-csv').onclick=()=>location.href=`/api/jobs/${state.jobId}/results.csv`;
-$('retry-failed').onclick=()=>{ const failed=state.results.filter(r=>r&&(r.status==='FAILED'||r.status==='CANCELLED')).map(r=>state.devices[r.index]).filter(Boolean); if(!failed.length) return showError('There are no failed or cancelled devices to retry (or the original device list is no longer loaded — reopen the job from History and retry from there).'); startJob(failed); };
+$('retry-failed').onclick=async()=>{
+  const failedCount = state.results.filter(r => r && (r.status === 'FAILED' || r.status === 'CANCELLED')).length;
+  if (!failedCount) return showError('There are no failed or cancelled devices to retry.');
+  if (!$('username').value.trim() || !$('password').value) return showError('Enter the SSH username and password.');
+  if (!state.jobId) return showError('No active job to retry - reopen it from History first.');
+
+  const form = new FormData();
+  form.append('username', $('username').value);
+  form.append('password', $('password').value);
+  form.append('enable_secret', $('enable-secret').value);
+
+  $('retry-failed').disabled = true;
+  try {
+    const response = await fetch(`/api/jobs/${state.jobId}/retry`, { method: 'POST', body: form });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || 'Unable to retry this job');
+
+    // Deliberately do NOT reset state.results or state.jobId here - retrying
+    // continues the SAME job, so every already-successful device's result
+    // (and its place in the downloadable outputs) is kept exactly as-is;
+    // only the retried devices' rows will update as they re-run.
+    state.jobFinished = false; state.reconnectAttempts = 0;
+    $('download-row').classList.add('hidden');
+    $('cancel-job').classList.remove('hidden'); $('cancel-job').disabled = false; $('cancel-job').textContent = 'Cancel job';
+    $('job-state').textContent = 'Running';
+    $('connection-status').classList.add('hidden');
+    appendLog(`Retrying ${payload.retrying_count} device(s); ${payload.kept_count} already-successful device(s) kept.`);
+    connectSocket();
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    $('retry-failed').disabled = false;
+  }
+};
 $('view-configs').onclick=async()=>{
   const response=await fetch(`/api/jobs/${state.jobId}/files`); const data=await response.json();
   const buttons=data.files.map(path=>`<button class="file-item" data-file="${escapeHtml(path)}">${escapeHtml(path)}</button>`).join('');
