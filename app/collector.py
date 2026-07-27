@@ -117,6 +117,24 @@ WLC_BULK_COMMANDS = [
     ("show wireless stats client detail", 900),
 ]
 
+# Classic AireOS controllers (5500/8500/WiSM2/2500 series) run a completely
+# different OS from IOS-XE - no privileged/enable mode, different pagination
+# command, and different show-command syntax entirely. show sysinfo and show
+# inventory are collected separately (see collect_one) for hostname/model
+# detection, so they're not repeated here.
+AIREOS_COMMANDS: list[tuple[str, int]] = [
+    ("show interface detailed management", 60),
+    ("show redundancy summary", 60),
+    ("show run-config", 1200),
+    ("show wlan apgroups", 60),
+    ("show advanced 802.11a summary", 60),
+    ("show advanced 802.11b summary", 60),
+    ("show ap inventory all", 600),
+    ("show ap stats ethernet summary", 120),
+    ("show cdp nei", 60),
+    ("show lldp nei", 60),
+]
+
 INVALID_PATTERNS = (
     "% Invalid input",
     "% Unrecognized command",
@@ -164,6 +182,18 @@ def extract_version_details(show_version: str, show_inventory: str = "") -> dict
     return {"model": model, "serial_number": serial, "software_version": version}
 
 
+def extract_aireos_sysinfo(show_sysinfo: str) -> dict[str, str]:
+    """Best-effort field extraction from AireOS `show sysinfo` output.
+    AireOS formats fields as 'Label.......... value' with a variable-length
+    run of dots; exact spacing/labels can vary slightly by AireOS release,
+    so this is deliberately tolerant and degrades to empty strings (rather
+    than guessing wrong) if a field isn't found - the raw show sysinfo
+    section in the log remains the authoritative source either way."""
+    system_name = first_match([r"^System Name[.\s]+(\S.*?)\s*$"], show_sysinfo)
+    product_version = first_match([r"^Product Version[.\s]+(\S.*?)\s*$"], show_sysinfo)
+    return {"system_name": system_name, "product_version": product_version}
+
+
 def detect_platform(show_version: str, model: str, device_type: str) -> tuple[str, bool]:
     haystack = f"{show_version}\n{model}\n{device_type}".upper()
     if any(marker in haystack for marker in ("C9800", "WIRELESS CONTROLLER", "AIR-CT", "CISCO_WLC", "WLC")):
@@ -178,6 +208,37 @@ def detect_platform(show_version: str, model: str, device_type: str) -> tuple[st
 def run_command(connection, command: str, timeout: int = 180) -> tuple[str, str]:
     try:
         output = connection.send_command(command, read_timeout=timeout, strip_prompt=True, strip_command=True)
+        status = "FAILED / UNSUPPORTED" if any(item.lower() in output.lower() for item in INVALID_PATTERNS) else "SUCCESS"
+        return output, status
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}", "FAILED"
+
+
+def run_command_with_confirmation(connection, command: str, timeout: int = 180) -> tuple[str, str]:
+    """Some AireOS commands (namely `show run-config`) show a one-time
+    'Press Enter to continue...' gate before producing their real output,
+    with a long, uneven pause before that output arrives on controllers
+    with many APs. A quiet-period timing read (Netmiko's own
+    send_command_w_enter) cuts off during that pause rather than waiting
+    through it, and Netmiko's default auto-detected prompt pattern doesn't
+    reliably match AireOS's parenthesized "(hostname) >" prompt format
+    either - so this builds the wait explicitly: a quick timing read for
+    the (fast-arriving) confirmation text, then a pattern-based read using
+    an explicitly re.escape'd prompt, which is what actually waits
+    correctly through a long pause instead of returning early or hanging."""
+    try:
+        stage1 = connection.send_command_timing(command, read_timeout=30, strip_prompt=False, strip_command=True)
+        if "Press Enter to" not in stage1 and "Press any key" not in stage1:
+            # No confirmation gate appeared (e.g. a different AireOS
+            # release) - what we already have is the real output.
+            status = "FAILED / UNSUPPORTED" if any(item.lower() in stage1.lower() for item in INVALID_PATTERNS) else "SUCCESS"
+            return stage1, status
+        pattern = rf"{re.escape(connection.base_prompt)}[>#]\s*$"
+        stage2 = connection.send_command(
+            connection.RETURN, expect_string=pattern, read_timeout=timeout,
+            strip_prompt=True, strip_command=True,
+        )
+        output = f"{stage1}\n{stage2}"
         status = "FAILED / UNSUPPORTED" if any(item.lower() in output.lower() for item in INVALID_PATTERNS) else "SUCCESS"
         return output, status
     except Exception as exc:
@@ -299,71 +360,125 @@ def collect_one(
             notify({"type": "device_update", "result": asdict(result)})
             return result
 
-        if not connection.check_enable_mode():
-            connection.enable()
-        connection.send_command("terminal length 0", expect_string=r"[#>]", read_timeout=15)
+        is_wlc = False
+        if device.device_type == "cisco_wlc":
+            # Classic AireOS-based WLC (5500/8500/WiSM2/2500 series). This is
+            # a different OS from IOS/IOS-XE with no privileged/enable mode
+            # at all, so skip that step entirely rather than risk the
+            # "Failed to enter enable mode" error that comes from trying it
+            # against a platform that doesn't support it.
+            connection.send_command("config paging disable", read_timeout=15)
 
-        hostname = extract_hostname(connection.find_prompt(), device.name)
-        result.detected_hostname = hostname
-        result.status = "COLLECTING"
-        notify({"type": "device_update", "result": asdict(result)})
-
-        parts = [
-            "=" * 96,
-            "NETWORK DEVICE COLLECTION LOG",
-            "=" * 96,
-            f"Inventory name : {device.name}",
-            f"Management IP  : {device.host}",
-            f"Detected host  : {hostname}",
-            f"Collected      : {datetime.now().astimezone().isoformat()}",
-            "=" * 96,
-            "",
-            "",
-        ]
-        attempted = successful = failed = 0
-
-        notify({"type": "log", "message": f"{hostname}: detecting platform with show version"})
-        show_version, version_status = run_command(connection, "show version", 120)
-        attempted += 1
-        successful += version_status == "SUCCESS"
-        failed += version_status != "SUCCESS"
-        if options.show_version:
-            append_section(parts, "show version", show_version, version_status)
-
-        show_inventory = ""
-        if options.show_inventory:
-            notify({"type": "log", "message": f"{hostname}: collecting show inventory"})
-            show_inventory, status = run_command(connection, "show inventory", 180)
+            attempted = successful = failed = 0
+            notify({"type": "log", "message": f"{device.name}: collecting show sysinfo"})
+            show_sysinfo, sysinfo_status = run_command(connection, "show sysinfo", 60)
             attempted += 1
-            successful += status == "SUCCESS"
-            failed += status != "SUCCESS"
-            append_section(parts, "show inventory", show_inventory, status)
+            successful += sysinfo_status == "SUCCESS"
+            failed += sysinfo_status != "SUCCESS"
 
-        details = extract_version_details(show_version, show_inventory)
-        result.model = details["model"]
-        result.serial_number = details["serial_number"]
-        result.software_version = details["software_version"]
-        result.platform, is_wlc = detect_platform(show_version, result.model, device.device_type)
+            notify({"type": "log", "message": f"{device.name}: collecting show inventory"})
+            show_inventory, inv_status = run_command(connection, "show inventory", 60)
+            attempted += 1
+            successful += inv_status == "SUCCESS"
+            failed += inv_status != "SUCCESS"
 
-        commands: list[tuple[str, int]] = []
-        if options.running_config:
-            commands.append(("show running-config", 300))
-        if options.startup_config:
-            commands.append(("show startup-config", 300))
-        if options.show_interfaces_status:
-            commands.append(("show interfaces status", 180))
-        if options.show_cdp_neighbors:
-            commands.append(("show cdp neighbors detail", 180))
-        if options.show_logging:
-            commands.append(("show logging", 600))
-        if options.extended_diagnostics:
-            commands.extend((command, 240) for command in BASE_COMMANDS)
+            sysinfo_details = extract_aireos_sysinfo(show_sysinfo)
+            inventory_details = extract_version_details("", show_inventory)
+            result.software_version = sysinfo_details["product_version"]
+            result.model = inventory_details["model"]
+            result.serial_number = inventory_details["serial_number"]
+            result.platform = "Cisco AireOS WLC"
+            hostname = sysinfo_details["system_name"] or device.name
+            result.detected_hostname = hostname
+            result.status = "COLLECTING"
+            notify({"type": "device_update", "result": asdict(result)})
 
-        if custom_commands:
-            commands.extend((command, 600) for command in custom_commands)
+            parts = [
+                "=" * 96,
+                "NETWORK DEVICE COLLECTION LOG",
+                "=" * 96,
+                f"Inventory name : {device.name}",
+                f"Management IP  : {device.host}",
+                f"Detected host  : {hostname}",
+                f"Collected      : {datetime.now().astimezone().isoformat()}",
+                "=" * 96,
+                "",
+                "",
+            ]
+            append_section(parts, "show sysinfo", show_sysinfo, sysinfo_status)
+            append_section(parts, "show inventory", show_inventory, inv_status)
+
+            commands: list[tuple[str, int]] = list(AIREOS_COMMANDS)
+            if custom_commands:
+                commands.extend((command, 600) for command in custom_commands)
+            seen: set[str] = {"show sysinfo", "show inventory"}
+        else:
+            if not connection.check_enable_mode():
+                connection.enable()
+            connection.send_command("terminal length 0", expect_string=r"[#>]", read_timeout=15)
+
+            hostname = extract_hostname(connection.find_prompt(), device.name)
+            result.detected_hostname = hostname
+            result.status = "COLLECTING"
+            notify({"type": "device_update", "result": asdict(result)})
+
+            parts = [
+                "=" * 96,
+                "NETWORK DEVICE COLLECTION LOG",
+                "=" * 96,
+                f"Inventory name : {device.name}",
+                f"Management IP  : {device.host}",
+                f"Detected host  : {hostname}",
+                f"Collected      : {datetime.now().astimezone().isoformat()}",
+                "=" * 96,
+                "",
+                "",
+            ]
+            attempted = successful = failed = 0
+
+            notify({"type": "log", "message": f"{hostname}: detecting platform with show version"})
+            show_version, version_status = run_command(connection, "show version", 120)
+            attempted += 1
+            successful += version_status == "SUCCESS"
+            failed += version_status != "SUCCESS"
+            if options.show_version:
+                append_section(parts, "show version", show_version, version_status)
+
+            show_inventory = ""
+            if options.show_inventory:
+                notify({"type": "log", "message": f"{hostname}: collecting show inventory"})
+                show_inventory, status = run_command(connection, "show inventory", 180)
+                attempted += 1
+                successful += status == "SUCCESS"
+                failed += status != "SUCCESS"
+                append_section(parts, "show inventory", show_inventory, status)
+
+            details = extract_version_details(show_version, show_inventory)
+            result.model = details["model"]
+            result.serial_number = details["serial_number"]
+            result.software_version = details["software_version"]
+            result.platform, is_wlc = detect_platform(show_version, result.model, device.device_type)
+
+            commands: list[tuple[str, int]] = []
+            if options.running_config:
+                commands.append(("show running-config", 300))
+            if options.startup_config:
+                commands.append(("show startup-config", 300))
+            if options.show_interfaces_status:
+                commands.append(("show interfaces status", 180))
+            if options.show_cdp_neighbors:
+                commands.append(("show cdp neighbors detail", 180))
+            if options.show_logging:
+                commands.append(("show logging", 600))
+            if options.extended_diagnostics:
+                commands.extend((command, 240) for command in BASE_COMMANDS)
+
+            if custom_commands:
+                commands.extend((command, 600) for command in custom_commands)
+
+            seen: set[str] = {"show version", "show inventory"}
 
         show_logging_output = ""
-        seen: set[str] = {"show version", "show inventory"}
         for command, timeout in commands:
             if command in seen:
                 continue
@@ -372,7 +487,10 @@ def collect_one(
                 notify({"type": "log", "message": f"{hostname}: cancellation requested - stopping before {command}"})
                 break
             notify({"type": "log", "message": f"{hostname}: collecting {command}"})
-            output, status = run_command(connection, command, timeout)
+            if command == "show run-config":
+                output, status = run_command_with_confirmation(connection, command, timeout)
+            else:
+                output, status = run_command(connection, command, timeout)
             attempted += 1
             successful += status == "SUCCESS"
             failed += status != "SUCCESS"
