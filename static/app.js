@@ -245,8 +245,52 @@ $('retry-failed').onclick=async()=>{
 $('view-configs').onclick=async()=>{
   const response=await fetch(`/api/jobs/${state.jobId}/files`); const data=await response.json();
   const buttons=data.files.map(path=>`<button class="file-item" data-file="${escapeHtml(path)}">${escapeHtml(path)}</button>`).join('');
-  openModal('Collected files', `<div class="file-list">${buttons||'<p>No text files found.</p>'}</div><textarea id="config-view" class="config-view" readonly placeholder="Select a file to preview"></textarea>`);
+  const supportsFolderPicker = 'showDirectoryPicker' in window;
+  const downloadAllLabel = supportsFolderPicker ? 'Download all to folder…' : 'Download all (as zip)';
+  openModal('Collected files', `
+    <div class="file-list-toolbar">
+      <button id="download-all-files" class="button secondary" type="button"${data.files.length ? '' : ' disabled'}>${downloadAllLabel}</button>
+      <p id="download-all-status" class="help"></p>
+    </div>
+    <div class="file-list">${buttons||'<p>No text files found.</p>'}</div>
+    <textarea id="config-view" class="config-view" readonly placeholder="Select a file to preview"></textarea>
+  `);
   document.querySelectorAll('[data-file]').forEach(btn=>btn.onclick=async()=>{ const r=await fetch(`/api/jobs/${state.jobId}/file?path=${encodeURIComponent(btn.dataset.file)}`); const file=await r.json(); $('config-view').value=file.content; });
+
+  $('download-all-files').onclick = async () => {
+    const statusEl = $('download-all-status');
+    if (!supportsFolderPicker) {
+      statusEl.textContent = "This browser can't choose a folder directly - downloading everything as a zip instead.";
+      location.href = `/api/jobs/${state.jobId}/download`;
+      return;
+    }
+    let dirHandle;
+    try {
+      dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    } catch (err) {
+      return; // user cancelled the folder picker - nothing to report
+    }
+    const button = $('download-all-files');
+    button.disabled = true;
+    try {
+      for (let i = 0; i < data.files.length; i++) {
+        const path = data.files[i];
+        const filename = path.split('/').pop();
+        statusEl.textContent = `Saving ${i + 1} of ${data.files.length}: ${filename}`;
+        const r = await fetch(`/api/jobs/${state.jobId}/file?path=${encodeURIComponent(path)}`);
+        const file = await r.json();
+        const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(file.content);
+        await writable.close();
+      }
+      statusEl.textContent = `Saved ${data.files.length} file(s) to the chosen folder.`;
+    } catch (err) {
+      statusEl.textContent = `Stopped early: ${err.message}`;
+    } finally {
+      button.disabled = false;
+    }
+  };
 };
 
 const JOB_STATE_LABELS = { RUNNING: 'Running', QUEUED: 'Queued', COMPLETE: 'Complete', FAILED: 'Failed', CANCELLED: 'Cancelled', INTERRUPTED: 'Interrupted' };
