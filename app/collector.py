@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import csv
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import ipaddress
 import re
+import socket
 import threading
 import zipfile
 from dataclasses import asdict, dataclass
@@ -12,8 +14,30 @@ from typing import Any, Callable, Iterable
 
 from netmiko import ConnectHandler
 from netmiko.exceptions import NetmikoAuthenticationException, NetmikoTimeoutException
+import paramiko
 
 from .log_analysis import analyze_show_logging, format_analysis_section, highest_severity
+
+# Recent Paramiko versions dropped 'ssh-rsa' (the older SHA-1 signature
+# scheme) from their default accepted host-key algorithms, keeping only
+# ssh-ed25519/ecdsa/rsa-sha2-256/512. Many embedded device SSH stacks -
+# confirmed here for an APC PDU, and plausible for other older network
+# gear - only support the legacy ssh-rsa scheme, so a connection to them
+# now fails outright with "Incompatible ssh peer (no acceptable host
+# key)" before authentication is even attempted. There's no
+# ConnectHandler/Paramiko connect() argument that adds an algorithm back
+# (disabled_algorithms can only remove from the list, never add to it),
+# so this appends it directly to the class-level default - appended, not
+# prepended, so any device offering a modern key type continues using
+# that in preference; only a device that exclusively offers ssh-rsa
+# falls back to it.
+if "ssh-rsa" not in paramiko.Transport._preferred_keys:
+    paramiko.Transport._preferred_keys += ("ssh-rsa",)
+if "ssh-rsa" not in paramiko.Transport._key_info:
+    paramiko.Transport._key_info["ssh-rsa"] = paramiko.RSAKey
+if "ssh-rsa" not in paramiko.RSAKey.HASHES:
+    from cryptography.hazmat.primitives import hashes as _crypto_hashes
+    paramiko.RSAKey.HASHES["ssh-rsa"] = _crypto_hashes.SHA1
 
 
 @dataclass(frozen=True)
@@ -177,6 +201,28 @@ def safe_name(value: str) -> str:
 def extract_hostname(prompt: str, fallback: str) -> str:
     value = re.sub(r"[>#]\s*$", "", prompt.strip()).strip()
     return value or fallback
+
+
+def resolve_management_ip(host: str) -> str:
+    """If `host` is already a literal IP address, returns it unchanged.
+    Otherwise it's a DNS-resolvable hostname (a common way to configure a
+    device when the collector's network has DNS set up for it) - resolves
+    it to a real IP purely for reporting, so the 'Management IP' column
+    always shows an actual IP rather than echoing back the hostname used
+    to connect. This never touches the actual SSH connection logic (which
+    keeps using the original host string exactly as before) and falls
+    back to that same original string if resolution fails for any reason
+    - a DNS hiccup here only means the report shows the hostname instead
+    of an IP, never a collection failure."""
+    try:
+        ipaddress.ip_address(host)
+        return host  # already a literal IP - nothing to resolve
+    except ValueError:
+        pass
+    try:
+        return socket.gethostbyname(host)
+    except (socket.gaierror, OSError):
+        return host
 
 
 def first_match(patterns: Iterable[str], text: str) -> str:
@@ -502,7 +548,7 @@ def collect_one(
     active_connections: dict[int, Any] | None = None,
     connections_lock: threading.Lock | None = None,
 ) -> DeviceResult:
-    result = DeviceResult(index=index, inventory_name=device.name, host=device.host, status="WAITING")
+    result = DeviceResult(index=index, inventory_name=device.name, host=resolve_management_ip(device.host), status="WAITING")
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
@@ -990,7 +1036,7 @@ def run_collection_job(
                 result = DeviceResult(
                     index=index,
                     inventory_name=device.name,
-                    host=device.host,
+                    host=resolve_management_ip(device.host),
                     status="FAILED",
                     error=f"{type(exc).__name__}: {exc}",
                 )
