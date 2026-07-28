@@ -102,6 +102,8 @@ input:focus, textarea:focus { outline: 2px solid #dbe2ff; border-color: #8ba0ef;
 .file-list { display: grid; gap: 8px; max-height: 250px; overflow: auto; margin-bottom: 14px; }
 .file-item { border: 1px solid var(--line); background: white; border-radius: 9px; padding: 10px; text-align: left; cursor: pointer; }
 .config-view { width: 100%; min-height: 380px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.file-list-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.file-list-toolbar .help { margin: 0; }
 .error-banner { background: #fff1f0; color: var(--danger); border: 1px solid #ffc9c5; border-radius: 10px; padding: 12px; margin-bottom: 14px; }
 @media (max-width: 1050px) {
   .shell { grid-template-columns: 1fr; }
