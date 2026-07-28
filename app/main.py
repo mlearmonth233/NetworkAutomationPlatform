@@ -180,7 +180,17 @@ def parse_custom_commands(custom_commands_json: str) -> list[str]:
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("index.html", {"request": request})
+    def asset_version(filename: str) -> int:
+        try:
+            return int((BASE_DIR / "static" / filename).stat().st_mtime)
+        except OSError:
+            return 0
+
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "app_js_version": asset_version("app.js"),
+        "styles_css_version": asset_version("styles.css"),
+    })
 
 
 def _start_collection_thread(

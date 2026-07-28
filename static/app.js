@@ -6,6 +6,7 @@ const DEVICE_TYPE_PRESETS = [
   { value: 'cisco_ios', label: 'Cisco IOS / IOS-XE / C9800 WLC' },
   { value: 'cisco_nxos', label: 'Cisco Nexus (NX-OS)' },
   { value: 'cisco_wlc', label: 'Cisco AireOS WLC (5500/8500/WiSM2)' },
+  { value: 'generic_termserver', label: 'APC PDU (AOS)' },
 ];
 function isKnownDeviceType(value) { return DEVICE_TYPE_PRESETS.some(p => p.value === value); }
 
@@ -69,7 +70,7 @@ function closeModal() { $('modal').classList.add('hidden'); }
 function showError(message) { openModal('Unable to continue', `<div class="error-banner">${escapeHtml(message)}</div><div class="modal-actions"><button class="button primary" onclick="document.getElementById('modal').classList.add('hidden')">Close</button></div>`); }
 
 $('add-device').addEventListener('click', () => addDevice());
-$('load-example').addEventListener('click', () => { state.devices = [{name:'USLIAP01SWA055',host:'192.0.2.55',port:22,device_type:'cisco_ios'},{name:'USLIAP01SWC001',host:'192.0.2.10',port:22,device_type:'cisco_ios'},{name:'USLIAP01NXA001',host:'192.0.2.20',port:22,device_type:'cisco_nxos'},{name:'USLIAP01WLC001',host:'192.0.2.30',port:22,device_type:'cisco_wlc'}]; renderDevices(); });
+$('load-example').addEventListener('click', () => { state.devices = [{name:'USLIAP01SWA055',host:'192.0.2.55',port:22,device_type:'cisco_ios'},{name:'USLIAP01SWC001',host:'192.0.2.10',port:22,device_type:'cisco_ios'},{name:'USLIAP01NXA001',host:'192.0.2.20',port:22,device_type:'cisco_nxos'},{name:'USLIAP01WLC001',host:'192.0.2.30',port:22,device_type:'cisco_wlc'},{name:'USLIAP01PDU001',host:'192.0.2.40',port:22,device_type:'generic_termserver'}]; renderDevices(); });
 
 $('download-template').addEventListener('click', () => {
   const rows = [
@@ -77,6 +78,7 @@ $('download-template').addEventListener('click', () => {
     ['CORE-SWITCH-01', '192.0.2.10', '22', 'cisco_ios'],
     ['NEXUS-SWITCH-01', '192.0.2.20', '22', 'cisco_nxos'],
     ['WLC-5520-01', '192.0.2.30', '22', 'cisco_wlc'],
+    ['PDU-01', '192.0.2.40', '22', 'generic_termserver'],
   ];
   const csv = rows.map(row => row.join(',')).join('\r\n') + '\r\n';
   const blob = new Blob([csv], { type: 'text/csv' });
