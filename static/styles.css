@@ -104,6 +104,8 @@ input:focus, textarea:focus { outline: 2px solid #dbe2ff; border-color: #8ba0ef;
 .config-view { width: 100%; min-height: 380px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .file-list-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
 .file-list-toolbar .help { margin: 0; }
+.checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; margin-bottom: 14px; cursor: pointer; }
+.checkbox-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
 .error-banner { background: #fff1f0; color: var(--danger); border: 1px solid #ffc9c5; border-radius: 10px; padding: 12px; margin-bottom: 14px; }
 @media (max-width: 1050px) {
   .shell { grid-template-columns: 1fr; }

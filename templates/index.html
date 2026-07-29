@@ -20,6 +20,7 @@
         <button id="nav-network-tools" class="nav-item" type="button">Ping &amp; DNS Checker</button>
         <button id="nav-history" class="nav-item" type="button">History</button>
         <button id="nav-r2o" class="nav-item" type="button">R2O Check</button>
+        <button id="nav-ddi" class="nav-item" type="button">DDI</button>
         <button class="nav-item" disabled>Compliance</button>
       </nav>
       <div class="sidebar-note">
@@ -332,6 +333,94 @@ show standby brief"></textarea>
             </table>
           </div>
           <p id="r2o-gaps-empty" class="help hidden">No coverage gaps found.</p>
+        </section>
+      </div>
+
+      <div id="ddi-view" class="app-view hidden">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">DNS / DHCP / IPAM</p>
+            <h1>DDI</h1>
+            <p class="subtitle">Extract VLAN interface and DHCP helper-address (relay) configuration from a core switch - either upload its config or connect to it directly.</p>
+          </div>
+          <div class="status-pill"><span class="dot"></span> Local runner</div>
+        </header>
+
+        <section class="card">
+          <div class="card-header">
+            <div><p class="step">STEP 1</p><h2>Provide the switch configuration</h2></div>
+          </div>
+          <div class="profile-tabs">
+            <button id="ddi-mode-upload" class="button secondary profile-tab active" type="button">Upload / paste config</button>
+            <button id="ddi-mode-connect" class="button secondary profile-tab" type="button">Connect to device</button>
+          </div>
+
+          <div id="ddi-upload-panel">
+            <label class="field-label" for="ddi-config-file">Config file (.txt, or any plain-text export of "show running-config")</label>
+            <input id="ddi-config-file" type="file" accept=".txt,.cfg,.conf,text/plain">
+            <p class="help">Or paste the config directly below instead:</p>
+            <textarea id="ddi-config-text" class="command-editor" rows="8" placeholder="interface Vlan10&#10; description Wired_Users&#10; ip address 10.1.1.1 255.255.255.0&#10; ip helper-address 10.2.2.5&#10;!"></textarea>
+          </div>
+
+          <div id="ddi-connect-panel" class="hidden">
+            <div class="form-grid">
+              <label class="field-label" for="ddi-host">Host / IP<input id="ddi-host" class="table-input" placeholder="10.1.1.1"></label>
+              <label class="field-label" for="ddi-port">Port<input id="ddi-port" class="table-input" type="number" value="22"></label>
+              <label class="field-label" for="ddi-device-type">Device type
+                <select id="ddi-device-type" class="table-input">
+                  <option value="cisco_ios">Cisco IOS / IOS-XE</option>
+                  <option value="cisco_nxos">Cisco Nexus (NX-OS)</option>
+                </select>
+              </label>
+              <label class="field-label" for="ddi-username">Username<input id="ddi-username" class="table-input"></label>
+              <label class="field-label" for="ddi-password">Password<input id="ddi-password" class="table-input" type="password"></label>
+              <label class="field-label" for="ddi-enable-secret">Enable secret (if different)<input id="ddi-enable-secret" class="table-input" type="password"></label>
+            </div>
+          </div>
+
+          <div class="button-row">
+            <button id="ddi-analyze" class="button primary" type="button">Analyze</button>
+          </div>
+          <p id="ddi-error" class="error-text hidden"></p>
+        </section>
+
+        <section class="card">
+          <div class="card-header">
+            <div><p class="step">STEP 2 (OPTIONAL)</p><h2>Filter the results</h2></div>
+          </div>
+          <label class="checkbox-row"><input id="ddi-hide-no-helpers" type="checkbox"> Hide VLANs with no helper addresses configured</label>
+          <label class="field-label" for="ddi-exclude-vlans">Exclude specific VLANs (comma-separated, e.g. a Guest VLAN whose DHCP server is out of scope)</label>
+          <input id="ddi-exclude-vlans" class="table-input" placeholder="e.g. 1214, 999" style="max-width:420px">
+        </section>
+
+        <section id="ddi-results" class="card hidden">
+          <div class="card-header">
+            <div><p class="step">RESULTS</p><h2 id="ddi-results-title">VLAN / Helper Address Summary</h2></div>
+            <a id="ddi-download" class="button secondary" href="#">Download Excel</a>
+          </div>
+          <div class="summary-grid">
+            <div><span>VLAN interfaces</span><strong id="ddi-vlan-count">0</strong></div>
+            <div><span>Unique helper addresses</span><strong id="ddi-helper-count">0</strong></div>
+          </div>
+
+          <h3 class="r2o-subheading">VLAN Helpers</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>VLAN</th><th>Interface</th><th>Description</th><th>SVI IP</th><th>Helper Address</th></tr></thead>
+              <tbody id="ddi-vlan-helpers-body"></tbody>
+            </table>
+          </div>
+
+          <h3 class="r2o-subheading">Unique Helpers</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Helper Address</th><th>Hostname (reverse DNS)</th><th>VLANs Using It</th></tr></thead>
+              <tbody id="ddi-unique-helpers-body"></tbody>
+            </table>
+          </div>
+
+          <h3 class="r2o-subheading">SVI Config (condensed)</h3>
+          <textarea id="ddi-svi-config" class="command-list" rows="12" readonly></textarea>
         </section>
       </div>
     </main>
