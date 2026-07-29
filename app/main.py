@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .collector import CollectionOptions, Device, DeviceResult, run_collection_job
+from .ddi import analyze_config, build_ddi_workbook, fetch_running_config
 from .network_tools import run_bulk_tests
 from .r2o_check import run_r2o_check
 
@@ -44,6 +45,8 @@ STORAGE_ROOT = _resolve_storage_root()
 STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
 R2O_STORAGE_ROOT = STORAGE_ROOT.parent / "r2o_checks"
 R2O_STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
+DDI_STORAGE_ROOT = STORAGE_ROOT.parent / "ddi_analyses"
+DDI_STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
 JOB_META_FILENAME = "job_meta.json"
 
 app = FastAPI(title="Network Automation Studio", version="2.3.0")
@@ -505,6 +508,71 @@ async def download_r2o_report(check_id: str) -> FileResponse:
     if not report_path.is_file():
         raise HTTPException(status_code=404, detail="Report not found")
     return FileResponse(report_path, filename=f"r2o-check-{check_id[:8]}.xlsx")
+
+
+@app.post("/api/ddi/analyze")
+async def ddi_analyze(
+    config_file: UploadFile | None = File(None),
+    config_text: str = Form(""),
+    host: str = Form(""),
+    port: int = Form(22),
+    device_type: str = Form("cisco_ios"),
+    username: str = Form(""),
+    password: str = Form(""),
+    enable_secret: str = Form(""),
+    hide_no_helpers: bool = Form(False),
+    exclude_vlans: str = Form(""),
+) -> JSONResponse:
+    try:
+        exclude_vlan_set = {int(v.strip()) for v in exclude_vlans.split(",") if v.strip()}
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Exclude VLANs must be a comma-separated list of numbers")
+
+    if config_file is not None:
+        raw = await config_file.read()
+        text = raw.decode("utf-8", errors="replace")
+        source_label = config_file.filename or "uploaded file"
+    elif config_text.strip():
+        text = config_text
+        source_label = "pasted configuration"
+    elif host.strip():
+        if not username.strip() or not password:
+            raise HTTPException(status_code=400, detail="Username and password are required to connect")
+        try:
+            text = await asyncio.to_thread(
+                fetch_running_config, host.strip(), port, device_type, username.strip(), password, enable_secret,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Could not connect: {type(exc).__name__}: {exc}") from exc
+        source_label = f"{host.strip()} (live collection)"
+    else:
+        raise HTTPException(status_code=400, detail="Upload a config file, paste one, or provide device connection details")
+
+    analysis = await asyncio.to_thread(analyze_config, text, source_label, hide_no_helpers, exclude_vlan_set)
+    workbook = await asyncio.to_thread(build_ddi_workbook, analysis)
+
+    analysis_id = uuid.uuid4().hex
+    analysis_dir = DDI_STORAGE_ROOT / analysis_id
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    workbook_path = analysis_dir / "ddi-analysis.xlsx"
+    await asyncio.to_thread(workbook.save, workbook_path)
+
+    return JSONResponse({
+        "analysis_id": analysis_id,
+        "source_label": analysis["source_label"],
+        "vlan_helpers": analysis["vlan_helpers"],
+        "unique_helpers": analysis["unique_helpers"],
+        "svi_config_text": analysis["svi_config_text"],
+        "vlan_count": len(analysis["vlan_interfaces"]),
+    })
+
+
+@app.get("/api/ddi/{analysis_id}/download")
+async def download_ddi_analysis(analysis_id: str) -> FileResponse:
+    workbook_path = DDI_STORAGE_ROOT / analysis_id / "ddi-analysis.xlsx"
+    if not workbook_path.is_file():
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    return FileResponse(workbook_path, filename=f"ddi-analysis-{analysis_id[:8]}.xlsx")
 
 
 @app.websocket("/ws/jobs/{job_id}")
