@@ -16,6 +16,16 @@ from .collector import (
     parse_aireos_ap_inventory,
     parse_aireos_ap_summary,
     parse_aireos_radio_summary,
+    parse_apc_about,
+    parse_apc_console,
+    parse_apc_ftp,
+    parse_apc_ntp,
+    parse_apc_outlet_status,
+    parse_apc_snmp,
+    parse_apc_snmpv3,
+    parse_apc_system,
+    parse_apc_tcpip,
+    parse_apc_web,
 )
 from .log_analysis import analyze_show_logging
 
@@ -389,7 +399,8 @@ def parse_port_channels(output: str, device: str, management_ip: str) -> list[di
 def collect_report_data(results: list[DeviceResult]) -> dict[str, list[dict[str, Any]]]:
     data: dict[str, list[dict[str, Any]]] = {
         "devices": [], "aps": [], "interfaces": [], "vlans": [], "neighbors": [],
-        "port_channels": [], "routes": [], "arp": [], "mac_table": [], "inventory": [], "commands": [], "log_alerts": [],
+        "port_channels": [], "routes": [], "arp": [], "mac_table": [], "pdu_info": [], "pdu_outlets": [],
+        "inventory": [], "commands": [], "log_alerts": [],
     }
     for result in sorted(results, key=lambda row: row.index):
         data["devices"].append({
@@ -481,6 +492,58 @@ def collect_report_data(results: list[DeviceResult]) -> dict[str, list[dict[str,
                 for ap_name, mac in parse_aireos_radio_summary(sections["show advanced 802.11a summary"]["output"]).items():
                     ap_row(ap_name)["radio_mac_5ghz"] = mac
             data["aps"].extend(ap_rows.values())
+        if result.platform == "APC PDU (AOS)":
+            pdu_row: dict[str, Any] = {
+                "hostname": hostname, "management_ip": result.host,
+                "model": result.model, "serial_number": result.serial_number,
+            }
+            if "about" in sections:
+                about = parse_apc_about(sections["about"]["output"])
+                pdu_row["mac_address"] = about["mac_address"]
+                pdu_row["nmc_model"] = about["nmc_model"]
+                pdu_row["nmc_serial"] = about["nmc_serial"]
+                pdu_row["app_version"] = about["app_version"]
+                pdu_row["aos_version"] = about["aos_version"]
+            if "system" in sections:
+                system = parse_apc_system(sections["system"]["output"])
+                pdu_row["contact"] = system["contact"]
+                pdu_row["location"] = system["location"]
+                pdu_row["uptime"] = system["uptime"]
+            if "web" in sections:
+                web = parse_apc_web(sections["web"]["output"])
+                pdu_row["http_enabled"] = web["http_enabled"]
+                pdu_row["https_enabled"] = web["https_enabled"]
+                pdu_row["min_tls"] = web["min_tls"]
+            if "console" in sections:
+                console = parse_apc_console(sections["console"]["output"])
+                pdu_row["telnet_enabled"] = console["telnet_enabled"]
+                pdu_row["ssh_enabled"] = console["ssh_enabled"]
+            if "ftp" in sections:
+                pdu_row["ftp_enabled"] = parse_apc_ftp(sections["ftp"]["output"])["ftp_enabled"]
+            if "ntp" in sections:
+                ntp = parse_apc_ntp(sections["ntp"]["output"])
+                pdu_row["ntp_status"] = ntp["ntp_status"]
+                pdu_row["ntp_primary_server"] = ntp["ntp_primary_server"]
+            if "snmp" in sections:
+                pdu_row["snmpv1_enabled"] = parse_apc_snmp(sections["snmp"]["output"])["snmpv1_enabled"]
+            if "snmpv3" in sections:
+                pdu_row["snmpv3_enabled"] = parse_apc_snmpv3(sections["snmpv3"]["output"])["snmpv3_enabled"]
+            if "tcpip" in sections:
+                tcpip = parse_apc_tcpip(sections["tcpip"]["output"])
+                pdu_row["subnet_mask"] = tcpip["subnet_mask"]
+                pdu_row["gateway"] = tcpip["gateway"]
+                pdu_row["domain_name"] = tcpip["domain_name"]
+            if "olstatus all" in sections:
+                outlets = parse_apc_outlet_status(sections["olstatus all"]["output"])
+                pdu_row["outlet_count"] = len(outlets)
+                pdu_row["outlets_on"] = sum(1 for o in outlets if o["status"] == "On")
+                pdu_row["outlets_off"] = sum(1 for o in outlets if o["status"] == "Off")
+                for outlet in outlets:
+                    data["pdu_outlets"].append({
+                        "hostname": hostname, "management_ip": result.host,
+                        "outlet": outlet["outlet"], "name": outlet["name"], "status": outlet["status"],
+                    })
+            data["pdu_info"].append(pdu_row)
         if "show interfaces status" in sections:
             data["interfaces"].extend(parse_interface_status(sections["show interfaces status"]["output"], hostname, result.host))
         if "show ip interface brief" in sections:
@@ -669,6 +732,24 @@ def create_technical_review_workbook(job_dir: Path, results: list[DeviceResult])
         ("primary_controller", "Primary Controller"), ("secondary_controller", "Secondary Controller"),
         ("neighbor_name", "Neighbor Switch"), ("neighbor_ip", "Neighbor Switch IP"), ("neighbor_port", "Neighbor Port"),
     ]), [24, 18, 26, 20, 20, 20, 22, 18, 20, 18, 18, 28, 24, 24, 24, 14, 16, 22, 24, 24, 24, 26, 20, 20])
+    writer.add_sheet("PDU Info", rows_for_sheet(data["pdu_info"], [
+        ("hostname", "Hostname"), ("management_ip", "Management IP"),
+        ("model", "Model"), ("serial_number", "Serial Number"), ("mac_address", "MAC Address"),
+        ("nmc_model", "NMC Model"), ("nmc_serial", "NMC Serial Number"),
+        ("aos_version", "AOS Version"), ("app_version", "App Version"),
+        ("contact", "Contact"), ("location", "Location"), ("uptime", "Uptime"),
+        ("subnet_mask", "Subnet Mask"), ("gateway", "Gateway"), ("domain_name", "Domain Name"),
+        ("http_enabled", "HTTP Enabled"), ("https_enabled", "HTTPS Enabled"), ("min_tls", "Minimum TLS"),
+        ("telnet_enabled", "Telnet Enabled"), ("ssh_enabled", "SSH Enabled"), ("ftp_enabled", "FTP Enabled"),
+        ("ntp_status", "NTP Status"), ("ntp_primary_server", "NTP Primary Server"),
+        ("snmpv1_enabled", "SNMPv1 Enabled"), ("snmpv3_enabled", "SNMPv3 Enabled"),
+        ("outlet_count", "Outlet Count"), ("outlets_on", "Outlets On"), ("outlets_off", "Outlets Off"),
+    ]), [22, 18, 20, 20, 20, 16, 20, 14, 14, 16, 28, 24, 16, 16, 20, 14, 14, 14, 16, 14, 14, 14, 22, 16, 16, 14, 12, 12])
+    pdu_outlet_highlight_rows = {i for i, record in enumerate(data["pdu_outlets"]) if record.get("status") == "Off"}
+    writer.add_sheet("PDU Outlets", rows_for_sheet(data["pdu_outlets"], [
+        ("hostname", "PDU Hostname"), ("management_ip", "Management IP"),
+        ("outlet", "Outlet"), ("name", "Outlet Name"), ("status", "Status"),
+    ]), [22, 18, 10, 26, 10], highlight_rows=pdu_outlet_highlight_rows)
     writer.add_sheet("Interfaces", rows_for_sheet(data["interfaces"], [
         ("device", "Device"), ("management_ip", "Management IP"), ("interface", "Interface"),
         ("description", "Description"), ("status", "Status"), ("protocol", "Protocol"),

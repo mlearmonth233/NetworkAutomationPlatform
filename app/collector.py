@@ -46,6 +46,7 @@ class Device:
     host: str
     port: int = 22
     device_type: str = "cisco_ios"
+    role: str = ""
 
 
 @dataclass
@@ -72,6 +73,7 @@ class DeviceResult:
     serial_number: str = ""
     software_version: str = ""
     platform: str = ""
+    role: str = ""
     access_point_count: int = 0
     output_directory: str = ""
     log_file: str = ""
@@ -484,32 +486,101 @@ def parse_aireos_ap_inventory(output: str) -> list[dict[str, str]]:
 def parse_apc_about(output: str) -> dict[str, str]:
     """Parses APC AOS `about` output. Only the first 'Hardware Factory'
     block is the PDU itself - the 'Network Management Card' block that
-    follows is the separate management card, with its own PID/SN. Confirmed
-    against a real Schneider Electric AOS v7.1.2 / RPDU 2g APP v7.1.3
-    session."""
-    block_match = re.search(r"Hardware Factory\s*\n-+\s*\n(.*?)(?:\n\n|\nNetwork Management Card)", output, re.DOTALL)
-    block = block_match.group(1) if block_match else output
-    model = re.search(r"Model Number:\s*(\S+)", block)
-    serial = re.search(r"Serial Number:\s*(\S+)", block)
-    mac = re.search(r"MAC Address:\s*([0-9A-Fa-f ]{17})", block)
+    follows is the separate management card, with its own PID/SN, and
+    'Application Module'/'APC OS(AOS)' give the two firmware versions.
+    Confirmed against a real Schneider Electric AOS v7.1.2 / RPDU 2g APP
+    v7.1.3 session."""
+    def block(name: str, stop_pattern: str) -> str:
+        match = re.search(rf"{name}\s*\n-+\s*\n(.*?)(?:\n\n|{stop_pattern})", output, re.DOTALL)
+        return match.group(1) if match else ""
+
+    def field(blk: str, name: str) -> str:
+        match = re.search(rf"{name}:\s*(\S+)", blk)
+        return match.group(1) if match else ""
+
+    hardware = block("Hardware Factory", r"\nNetwork Management Card")
+    nmc = block("Network Management Card", r"\nApplication Module")
+    app = block("Application Module", r"\nAPC OS")
+    aos = output[output.index("APC OS(AOS)"):] if "APC OS(AOS)" in output else ""
+    mac = re.search(r"MAC Address:\s*([0-9A-Fa-f ]{17})", hardware)
     return {
-        "model": model.group(1) if model else "",
-        "serial_number": serial.group(1) if serial else "",
+        "model": field(hardware, "Model Number"),
+        "serial_number": field(hardware, "Serial Number"),
         "mac_address": mac.group(1).strip().replace(" ", ":").lower() if mac else "",
+        "nmc_model": field(nmc, "Model Number"),
+        "nmc_serial": field(nmc, "Serial Number"),
+        "app_version": field(app, "Version"),
+        "aos_version": field(aos, "Version"),
     }
 
 
 def parse_apc_system(output: str) -> dict[str, str]:
     """Parses APC AOS `system` output for identifying fields. Confirmed
     against a real session."""
-    name = re.search(r"^Name:\s*(\S+)", output, re.MULTILINE)
-    contact = re.search(r"^Contact:\s*(.+)$", output, re.MULTILINE)
-    location = re.search(r"^Location:\s*(.+)$", output, re.MULTILINE)
+    def field(name: str) -> str:
+        match = re.search(rf"^{name}:\s*(.+)$", output, re.MULTILINE)
+        return match.group(1).strip() if match else ""
+
     return {
-        "hostname": name.group(1) if name else "",
-        "contact": contact.group(1).strip() if contact else "",
-        "location": location.group(1).strip() if location else "",
+        "hostname": field("Name"), "contact": field("Contact"),
+        "location": field("Location"), "uptime": field("Up Time"),
     }
+
+
+def parse_apc_web(output: str) -> dict[str, str]:
+    """Parses APC AOS `web` output. Confirmed against a real session."""
+    def field(name: str) -> str:
+        match = re.search(rf"^{name}:\s*(\S+)", output, re.MULTILINE)
+        return match.group(1) if match else ""
+
+    return {"http_enabled": field("Http"), "https_enabled": field("Https"), "min_tls": field("Minimum Protocol")}
+
+
+def parse_apc_console(output: str) -> dict[str, str]:
+    """Parses APC AOS `console` output. Confirmed against a real session."""
+    def field(name: str) -> str:
+        match = re.search(rf"^{name}:\s*(\S+)", output, re.MULTILINE)
+        return match.group(1) if match else ""
+
+    return {"telnet_enabled": field("Telnet"), "ssh_enabled": field("SSH")}
+
+
+def parse_apc_ftp(output: str) -> dict[str, str]:
+    """Parses APC AOS `ftp` output. Confirmed against a real session."""
+    match = re.search(r"^Service:\s*(\S+)", output, re.MULTILINE)
+    return {"ftp_enabled": match.group(1) if match else ""}
+
+
+def parse_apc_ntp(output: str) -> dict[str, str]:
+    """Parses APC AOS `ntp` output. Confirmed against a real session."""
+    status = re.search(r"^NTP status:\s*(\S+)", output, re.MULTILINE)
+    primary = re.search(r"^Active Primary NTP Server:\s*(\S+)", output, re.MULTILINE)
+    return {
+        "ntp_status": status.group(1) if status else "",
+        "ntp_primary_server": primary.group(1) if primary else "",
+    }
+
+
+def parse_apc_snmp(output: str) -> dict[str, str]:
+    """Parses APC AOS `snmp` output (SNMPv1). Confirmed against a real
+    session."""
+    match = re.search(r"^\s*SNMPv1:\s*(\S+)", output, re.MULTILINE)
+    return {"snmpv1_enabled": match.group(1) if match else ""}
+
+
+def parse_apc_snmpv3(output: str) -> dict[str, str]:
+    """Parses APC AOS `snmpv3` output. Confirmed against a real session."""
+    match = re.search(r"^\s*SNMPV3:\s*(\S+)", output, re.MULTILINE)
+    return {"snmpv3_enabled": match.group(1) if match else ""}
+
+
+def parse_apc_tcpip(output: str) -> dict[str, str]:
+    """Parses APC AOS `tcpip` output. Confirmed against a real session."""
+    def field(name: str) -> str:
+        match = re.search(rf"^\s*{name}:\s*(\S+)", output, re.MULTILINE)
+        return match.group(1) if match else ""
+
+    return {"subnet_mask": field("Subnet Mask"), "gateway": field("Gateway"), "domain_name": field("Domain Name")}
 
 
 def parse_apc_outlet_status(output: str) -> list[dict[str, str]]:
@@ -548,7 +619,7 @@ def collect_one(
     active_connections: dict[int, Any] | None = None,
     connections_lock: threading.Lock | None = None,
 ) -> DeviceResult:
-    result = DeviceResult(index=index, inventory_name=device.name, host=resolve_management_ip(device.host), status="WAITING")
+    result = DeviceResult(index=index, inventory_name=device.name, host=resolve_management_ip(device.host), status="WAITING", role=device.role)
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
@@ -1039,6 +1110,7 @@ def run_collection_job(
                     host=resolve_management_ip(device.host),
                     status="FAILED",
                     error=f"{type(exc).__name__}: {exc}",
+                    role=device.role,
                 )
                 notify({"type": "device_update", "result": asdict(result)})
             results_by_index[index] = result

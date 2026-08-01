@@ -1,3 +1,6 @@
-name,host,port,device_type
-USLIAP01SWA055,192.0.2.55,22,cisco_ios
-USLIAP01SWC001,192.0.2.10,22,cisco_ios
+name,host,port,device_type,role
+USLIAP01SWA055,192.0.2.55,22,cisco_ios,Access Switch
+USLIAP01SWC001,192.0.2.10,22,cisco_ios,Core Switch
+USLIAP01NXA001,192.0.2.20,22,cisco_nxos,Nexus 9000 Standalone
+USLIAP01WLC001,192.0.2.30,22,cisco_wlc,WLC AireOS
+USLIAP01PDU001,192.0.2.40,22,generic_termserver,APC Smart PDU

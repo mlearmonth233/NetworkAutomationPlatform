@@ -10,6 +10,17 @@ const DEVICE_TYPE_PRESETS = [
 ];
 function isKnownDeviceType(value) { return DEVICE_TYPE_PRESETS.some(p => p.value === value); }
 
+const ROLE_PRESETS = [
+  'Core Switch', 'Core Switch (-Y4C)', 'OT Core', 'Distribution Switch', 'Distro 9600 Modular',
+  'Access Switch', 'OT Access Switch', '9200CX Switch', '9200CX Media Converter', 'Server Switch 9300',
+  'Industrial Switch', 'DMZ L2 switch', 'DMZ L3 switch', 'Management Switch - CNF',
+  'WLC 9800 IOS-XE', 'Flex vWLC 9800 IOS-XE', 'WLC AireOS',
+  'WGB Autonomous AP', 'WGB 9120_2800_3800', 'APC Smart PDU', 'Avocent Console',
+  'ASR1K Router (Cisco 8k router)', 'Nexus 9000 Standalone', 'Nexus 9000 - fabric attached',
+  'vEdge Full Config', 'Versa', 'TDM Router Config', 'StackWiseVirtual Setup',
+  'CaaS 2 Site P2P', 'Voice CUBE Sites', 'PointerStorage',
+];
+
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 }
@@ -19,6 +30,8 @@ function renderDevices() {
     const type = d.device_type == null ? 'cisco_ios' : d.device_type;
     const known = isKnownDeviceType(type);
     const options = DEVICE_TYPE_PRESETS.map(p => `<option value="${p.value}"${type === p.value ? ' selected' : ''}>${escapeHtml(p.label)}</option>`).join('');
+    const role = d.role || '';
+    const roleOptions = ROLE_PRESETS.map(r => `<option value="${escapeHtml(r)}"${role === r ? ' selected' : ''}>${escapeHtml(r)}</option>`).join('');
     return `
     <tr>
       <td><input class="table-input" data-index="${i}" data-field="name" value="${escapeHtml(d.name)}"></td>
@@ -31,11 +44,20 @@ function renderDevices() {
         </select>
         <input class="table-input device-type-other${known ? ' hidden' : ''}" data-index="${i}" placeholder="netmiko device type" value="${known ? '' : escapeHtml(type)}">
       </td>
+      <td>
+        <select class="table-input device-role-select" data-index="${i}">
+          <option value=""${role === '' ? ' selected' : ''}>Not specified</option>
+          ${roleOptions}
+        </select>
+      </td>
       <td><button class="delete-row" data-delete="${i}" title="Remove">×</button></td>
     </tr>`;
   }).join('');
   document.querySelectorAll('.table-input[data-field]').forEach(input => input.addEventListener('input', e => {
     const i = Number(e.target.dataset.index); state.devices[i][e.target.dataset.field] = e.target.value;
+  }));
+  document.querySelectorAll('.device-role-select').forEach(select => select.addEventListener('change', e => {
+    const i = Number(e.target.dataset.index); state.devices[i].role = e.target.value;
   }));
   document.querySelectorAll('.device-type-select').forEach(select => select.addEventListener('change', e => {
     const i = Number(e.target.dataset.index);
@@ -62,7 +84,7 @@ function parseCsv(text) {
   return lines.map(line => {
     const parts = line.split(',').map(v => v.trim());
     const row = {}; headers.forEach((h,i) => row[h] = parts[i] ?? '');
-    return {name: row.name || row.hostname || row.host, host: row.host || row.ip || row.address, port: row.port || 22, device_type: row.device_type || 'cisco_ios'};
+    return {name: row.name || row.hostname || row.host, host: row.host || row.ip || row.address, port: row.port || 22, device_type: row.device_type || 'cisco_ios', role: row.role || ''};
   }).filter(d => d.host);
 }
 function openModal(title, html) { $('modal-title').textContent = title; $('modal-body').innerHTML = html; $('modal').classList.remove('hidden'); }
@@ -70,15 +92,15 @@ function closeModal() { $('modal').classList.add('hidden'); }
 function showError(message) { openModal('Unable to continue', `<div class="error-banner">${escapeHtml(message)}</div><div class="modal-actions"><button class="button primary" onclick="document.getElementById('modal').classList.add('hidden')">Close</button></div>`); }
 
 $('add-device').addEventListener('click', () => addDevice());
-$('load-example').addEventListener('click', () => { state.devices = [{name:'USLIAP01SWA055',host:'192.0.2.55',port:22,device_type:'cisco_ios'},{name:'USLIAP01SWC001',host:'192.0.2.10',port:22,device_type:'cisco_ios'},{name:'USLIAP01NXA001',host:'192.0.2.20',port:22,device_type:'cisco_nxos'},{name:'USLIAP01WLC001',host:'192.0.2.30',port:22,device_type:'cisco_wlc'},{name:'USLIAP01PDU001',host:'192.0.2.40',port:22,device_type:'generic_termserver'}]; renderDevices(); });
+$('load-example').addEventListener('click', () => { state.devices = [{name:'USLIAP01SWA055',host:'192.0.2.55',port:22,device_type:'cisco_ios',role:'Access Switch'},{name:'USLIAP01SWC001',host:'192.0.2.10',port:22,device_type:'cisco_ios',role:'Core Switch'},{name:'USLIAP01NXA001',host:'192.0.2.20',port:22,device_type:'cisco_nxos',role:'Nexus 9000 Standalone'},{name:'USLIAP01WLC001',host:'192.0.2.30',port:22,device_type:'cisco_wlc',role:'WLC AireOS'},{name:'USLIAP01PDU001',host:'192.0.2.40',port:22,device_type:'generic_termserver',role:'APC Smart PDU'}]; renderDevices(); });
 
 $('download-template').addEventListener('click', () => {
   const rows = [
-    ['name', 'host', 'port', 'device_type'],
-    ['CORE-SWITCH-01', '192.0.2.10', '22', 'cisco_ios'],
-    ['NEXUS-SWITCH-01', '192.0.2.20', '22', 'cisco_nxos'],
-    ['WLC-5520-01', '192.0.2.30', '22', 'cisco_wlc'],
-    ['PDU-01', '192.0.2.40', '22', 'generic_termserver'],
+    ['name', 'host', 'port', 'device_type', 'role'],
+    ['CORE-SWITCH-01', '192.0.2.10', '22', 'cisco_ios', 'Core Switch'],
+    ['NEXUS-SWITCH-01', '192.0.2.20', '22', 'cisco_nxos', 'Nexus 9000 Standalone'],
+    ['WLC-5520-01', '192.0.2.30', '22', 'cisco_wlc', 'WLC AireOS'],
+    ['PDU-01', '192.0.2.40', '22', 'generic_termserver', 'APC Smart PDU'],
   ];
   const csv = rows.map(row => row.join(',')).join('\r\n') + '\r\n';
   const blob = new Blob([csv], { type: 'text/csv' });
@@ -426,7 +448,7 @@ function renderCoreProfile(name='catalyst') {
   document.querySelectorAll('.profile-tab').forEach(button => button.classList.toggle('active', button.dataset.profile === name));
 }
 function showAppView(viewName) {
-  ['collector','profiles','network-tools','history','r2o'].forEach(name => {
+  ['collector','profiles','network-tools','history','r2o','ddi','compliance'].forEach(name => {
     $(`${name}-view`).classList.toggle('hidden', name !== viewName);
     const nav = $(`nav-${name}`); if (nav) nav.classList.toggle('active', name === viewName);
   });
@@ -439,6 +461,8 @@ $('nav-network-tools').addEventListener('click', () => showAppView('network-tool
 $('nav-history').addEventListener('click', () => { showAppView('history'); loadHistory(); });
 $('refresh-history').addEventListener('click', loadHistory);
 $('nav-r2o').addEventListener('click', () => showAppView('r2o'));
+$('nav-ddi').addEventListener('click', () => showAppView('ddi'));
+$('nav-compliance').addEventListener('click', () => { showAppView('compliance'); loadComplianceJobs(); });
 document.querySelectorAll('.profile-tab').forEach(button => button.addEventListener('click', () => renderCoreProfile(button.dataset.profile)));
 $('save-custom-commands').addEventListener('click', saveCustomCommands);
 $('clear-custom-commands').addEventListener('click', () => { $('custom-commands').value=''; saveCustomCommands(); });
@@ -628,4 +652,193 @@ function renderR2oResults(payload) {
   </tr>`).join('');
 
   $('r2o-results').scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+let ddiMode = 'upload';
+$('ddi-mode-upload').addEventListener('click', () => {
+  ddiMode = 'upload';
+  $('ddi-mode-upload').classList.add('active');
+  $('ddi-mode-connect').classList.remove('active');
+  $('ddi-upload-panel').classList.remove('hidden');
+  $('ddi-connect-panel').classList.add('hidden');
+});
+$('ddi-mode-connect').addEventListener('click', () => {
+  ddiMode = 'connect';
+  $('ddi-mode-connect').classList.add('active');
+  $('ddi-mode-upload').classList.remove('active');
+  $('ddi-connect-panel').classList.remove('hidden');
+  $('ddi-upload-panel').classList.add('hidden');
+});
+
+$('ddi-analyze').addEventListener('click', async () => {
+  $('ddi-error').classList.add('hidden');
+  const form = new FormData();
+  if (ddiMode === 'upload') {
+    const fileInput = $('ddi-config-file');
+    const pastedText = $('ddi-config-text').value.trim();
+    if (fileInput.files && fileInput.files[0]) {
+      form.append('config_file', fileInput.files[0]);
+    } else if (pastedText) {
+      form.append('config_text', pastedText);
+    } else {
+      $('ddi-error').textContent = 'Upload a config file or paste one.';
+      $('ddi-error').classList.remove('hidden');
+      return;
+    }
+  } else {
+    if (!$('ddi-host').value.trim() || !$('ddi-username').value.trim() || !$('ddi-password').value) {
+      $('ddi-error').textContent = 'Host, username, and password are required to connect.';
+      $('ddi-error').classList.remove('hidden');
+      return;
+    }
+    form.append('host', $('ddi-host').value.trim());
+    form.append('port', $('ddi-port').value || '22');
+    form.append('device_type', $('ddi-device-type').value);
+    form.append('username', $('ddi-username').value.trim());
+    form.append('password', $('ddi-password').value);
+    form.append('enable_secret', $('ddi-enable-secret').value);
+  }
+  form.append('hide_no_helpers', $('ddi-hide-no-helpers').checked ? 'true' : 'false');
+  form.append('exclude_vlans', $('ddi-exclude-vlans').value.trim());
+
+  $('ddi-analyze').disabled = true;
+  $('ddi-analyze').textContent = ddiMode === 'connect' ? 'Connecting…' : 'Analyzing…';
+  try {
+    const response = await fetch('/api/ddi/analyze', { method: 'POST', body: form });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || 'Analysis failed');
+    renderDdiResults(payload);
+  } catch (error) {
+    $('ddi-error').textContent = error.message;
+    $('ddi-error').classList.remove('hidden');
+  } finally {
+    $('ddi-analyze').disabled = false;
+    $('ddi-analyze').textContent = 'Analyze';
+  }
+});
+
+let ddiVlanHelpers = [];
+
+function renderDdiResults(payload) {
+  $('ddi-results').classList.remove('hidden');
+  $('ddi-results-title').textContent = `VLAN / Helper Address Summary - ${payload.source_label}`;
+  $('ddi-download').href = `/api/ddi/${payload.analysis_id}/download`;
+  $('ddi-vlan-count').textContent = payload.vlan_count;
+  $('ddi-helper-count').textContent = (payload.unique_helpers || []).length;
+
+  $('ddi-vlan-helpers-body').innerHTML = (payload.vlan_helpers || []).map(r => `<tr>
+    <td>${escapeHtml(String(r.vlan))}</td><td>${escapeHtml(r.interface)}</td><td>${escapeHtml(r.description)}</td>
+    <td>${escapeHtml(r.svi_ip)}</td><td>${escapeHtml(r.helper_address)}</td>
+  </tr>`).join('');
+
+  ddiVlanHelpers = payload.vlan_helpers || [];
+  $('ddi-unique-helpers-body').innerHTML = (payload.unique_helpers || []).map(r => `<tr>
+    <td>${escapeHtml(r.helper_address)}</td><td>${escapeHtml(r.hostname)}</td><td>${escapeHtml(String(r.vlan_count))}</td>
+    <td><button class="button ghost" type="button" data-generate-removal="${escapeHtml(r.helper_address)}">Generate removal config</button></td>
+  </tr>`).join('');
+  $('ddi-removal-config').value = '';
+  $('ddi-rollback-config').value = '';
+  $('ddi-removal-summary').classList.add('hidden');
+
+  $('ddi-svi-config').value = payload.svi_config_text || '';
+  $('ddi-results').scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+$('ddi-unique-helpers-body').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-generate-removal]');
+  if (!button) return;
+  const helper = button.dataset.generateRemoval;
+  const matchingVlans = ddiVlanHelpers.filter(r => r.helper_address === helper);
+
+  if (!matchingVlans.length) {
+    $('ddi-removal-summary').textContent = `${helper} isn't configured on any SVI - nothing to remove.`;
+    $('ddi-removal-summary').classList.remove('hidden');
+    $('ddi-removal-config').value = '';
+    $('ddi-rollback-config').value = '';
+    return;
+  }
+
+  const removalLines = [`! Removing helper-address ${helper} from ${matchingVlans.length} SVI(s)`];
+  const rollbackLines = [`! Rollback: re-adding helper-address ${helper} to ${matchingVlans.length} SVI(s)`];
+  for (const vlan of matchingVlans) {
+    removalLines.push(vlan.interface);
+    removalLines.push(` no ip helper-address ${helper}`);
+    removalLines.push('!');
+    rollbackLines.push(vlan.interface);
+    rollbackLines.push(` ip helper-address ${helper}`);
+    rollbackLines.push('!');
+  }
+  $('ddi-removal-config').value = removalLines.join('\n');
+  $('ddi-rollback-config').value = rollbackLines.join('\n');
+  $('ddi-removal-summary').textContent = `Removing ${helper} from ${matchingVlans.length} VLAN(s): ${matchingVlans.map(v => v.vlan).join(', ')}`;
+  $('ddi-removal-summary').classList.remove('hidden');
+  $('ddi-removal-config').scrollIntoView({behavior: 'smooth', block: 'center'});
+});
+
+async function loadComplianceJobs() {
+  try {
+    const response = await fetch('/api/jobs');
+    const payload = await response.json();
+    const jobs = (payload.jobs || []).filter(j => (j.successful || 0) > 0);
+    const select = $('compliance-job-select');
+    $('compliance-no-jobs').classList.toggle('hidden', jobs.length > 0);
+    select.innerHTML = jobs.map(j => {
+      const when = j.created_at ? new Date(j.created_at).toLocaleString() : 'Unknown time';
+      return `<option value="${escapeHtml(j.id)}">${escapeHtml(when)} - ${j.device_count} device(s), ${j.successful} successful</option>`;
+    }).join('');
+  } catch {
+    showError('Unable to load collection jobs.');
+  }
+}
+$('compliance-refresh-jobs').addEventListener('click', loadComplianceJobs);
+
+$('compliance-run-firmware').addEventListener('click', async () => {
+  $('compliance-error').classList.add('hidden');
+  const jobId = $('compliance-job-select').value;
+  const fileInput = $('compliance-tech-stack-file');
+  if (!jobId) {
+    $('compliance-error').textContent = 'Pick a collection job first.';
+    $('compliance-error').classList.remove('hidden');
+    return;
+  }
+  if (!fileInput.files || !fileInput.files[0]) {
+    $('compliance-error').textContent = 'Upload the Tech Stack reference file.';
+    $('compliance-error').classList.remove('hidden');
+    return;
+  }
+  const form = new FormData();
+  form.append('job_id', jobId);
+  form.append('tech_stack_file', fileInput.files[0]);
+
+  $('compliance-run-firmware').disabled = true;
+  $('compliance-run-firmware').textContent = 'Checking…';
+  try {
+    const response = await fetch('/api/compliance/firmware', { method: 'POST', body: form });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || 'Compliance check failed');
+    renderComplianceResults(payload);
+  } catch (error) {
+    $('compliance-error').textContent = error.message;
+    $('compliance-error').classList.remove('hidden');
+  } finally {
+    $('compliance-run-firmware').disabled = false;
+    $('compliance-run-firmware').textContent = 'Run Firmware Check';
+  }
+});
+
+function renderComplianceResults(payload) {
+  $('compliance-results').classList.remove('hidden');
+  $('compliance-compliant-count').textContent = payload.compliant_count;
+  $('compliance-noncompliant-count').textContent = payload.non_compliant_count;
+  $('compliance-unknown-count').textContent = payload.unknown_count;
+
+  const statusClass = { COMPLIANT: 'status-complete', NON_COMPLIANT: 'status-failed', UNKNOWN: 'status-cancelled' };
+  const statusLabel = { COMPLIANT: 'Compliant', NON_COMPLIANT: 'Non-compliant', UNKNOWN: 'Unknown' };
+  $('compliance-results-body').innerHTML = (payload.results || []).map(r => `<tr>
+    <td>${escapeHtml(r.hostname)}</td><td>${escapeHtml(r.host)}</td><td>${escapeHtml(r.role || '—')}</td><td>${escapeHtml(r.model)}</td>
+    <td>${escapeHtml(r.actual_version)}</td><td>${escapeHtml(r.expected_version)}</td>
+    <td><span class="job-status-tag ${statusClass[r.status] || ''}">${statusLabel[r.status] || r.status}</span></td>
+    <td>${escapeHtml(r.detail)}</td>
+  </tr>`).join('');
+  $('compliance-results').scrollIntoView({behavior: 'smooth', block: 'start'});
 }

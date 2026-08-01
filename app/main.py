@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -17,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .collector import CollectionOptions, Device, DeviceResult, run_collection_job
+from .compliance import check_firmware_compliance, parse_tech_stack
 from .ddi import analyze_config, build_ddi_workbook, fetch_running_config
 from .network_tools import run_bulk_tests
 from .r2o_check import run_r2o_check
@@ -150,13 +152,14 @@ def parse_devices(raw: str) -> list[Device]:
             host = str(row.get("host") or "").strip()
             port = int(row.get("port") or 22)
             device_type = str(row.get("device_type") or "cisco_ios").strip()
+            role = str(row.get("role") or "").strip()
         except (AttributeError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=f"Invalid device row {position}") from exc
         if not name or not host:
             raise HTTPException(status_code=400, detail=f"Device row {position} requires name and host")
         if not 1 <= port <= 65535:
             raise HTTPException(status_code=400, detail=f"Invalid port on row {position}")
-        devices.append(Device(name=name, host=host, port=port, device_type=device_type))
+        devices.append(Device(name=name, host=host, port=port, device_type=device_type, role=role))
     return devices
 
 
@@ -183,11 +186,12 @@ def parse_custom_commands(custom_commands_json: str) -> list[str]:
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request) -> HTMLResponse:
-    def asset_version(filename: str) -> int:
+    def asset_version(filename: str) -> str:
         try:
-            return int((BASE_DIR / "static" / filename).stat().st_mtime)
+            content = (BASE_DIR / "static" / filename).read_bytes()
+            return hashlib.md5(content).hexdigest()[:12]
         except OSError:
-            return 0
+            return "0"
 
     return templates.TemplateResponse("index.html", {
         "request": request,
@@ -573,6 +577,36 @@ async def download_ddi_analysis(analysis_id: str) -> FileResponse:
     if not workbook_path.is_file():
         raise HTTPException(status_code=404, detail="Analysis not found")
     return FileResponse(workbook_path, filename=f"ddi-analysis-{analysis_id[:8]}.xlsx")
+
+
+@app.post("/api/compliance/firmware")
+async def compliance_firmware(
+    job_id: str = Form(...),
+    tech_stack_file: UploadFile = File(...),
+) -> JSONResponse:
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    devices = job.get("results") or []
+    if not devices:
+        raise HTTPException(status_code=400, detail="This job has no collected device results yet")
+
+    raw = await tech_stack_file.read()
+    try:
+        tech_stack = await asyncio.to_thread(parse_tech_stack, raw)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read the Tech Stack file: {type(exc).__name__}: {exc}") from exc
+    if not tech_stack:
+        raise HTTPException(status_code=400, detail="No 'Tech Stack' sheet with the expected columns was found in that file")
+
+    results = await asyncio.to_thread(check_firmware_compliance, devices, tech_stack)
+    return JSONResponse({
+        "job_id": job_id,
+        "results": results,
+        "compliant_count": sum(1 for r in results if r["status"] == "COMPLIANT"),
+        "non_compliant_count": sum(1 for r in results if r["status"] == "NON_COMPLIANT"),
+        "unknown_count": sum(1 for r in results if r["status"] == "UNKNOWN"),
+    })
 
 
 @app.websocket("/ws/jobs/{job_id}")

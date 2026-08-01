@@ -21,7 +21,7 @@
         <button id="nav-history" class="nav-item" type="button">History</button>
         <button id="nav-r2o" class="nav-item" type="button">R2O Check</button>
         <button id="nav-ddi" class="nav-item" type="button">DDI</button>
-        <button class="nav-item" disabled>Compliance</button>
+        <button id="nav-compliance" class="nav-item" type="button">Compliance</button>
       </nav>
       <div class="sidebar-note">
         <strong>Read-only MVP</strong>
@@ -63,11 +63,11 @@
 
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Name</th><th>IP / Host</th><th>Port</th><th>Device Type</th><th></th></tr></thead>
+              <thead><tr><th>Name</th><th>IP / Host</th><th>Port</th><th>Device Type</th><th>Role</th><th></th></tr></thead>
               <tbody id="device-body"></tbody>
             </table>
           </div>
-          <p class="help">CSV columns: <code>name,host,port,device_type</code>. Only name and host are required. Not sure what to put in <code>device_type</code>? Download the template above for a working example of each supported type.</p>
+          <p class="help">CSV columns: <code>name,host,port,device_type,role</code>. Only name and host are required; role is optional and used for compliance checks against the customer's standard config template. Not sure what to put in <code>device_type</code>? Download the template above for a working example of each supported type.</p>
         </div>
 
         <div class="card">
@@ -414,13 +414,68 @@ show standby brief"></textarea>
           <h3 class="r2o-subheading">Unique Helpers</h3>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Helper Address</th><th>Hostname (reverse DNS)</th><th>VLANs Using It</th></tr></thead>
+              <thead><tr><th>Helper Address</th><th>Hostname (reverse DNS)</th><th>VLANs Using It</th><th>Action</th></tr></thead>
               <tbody id="ddi-unique-helpers-body"></tbody>
             </table>
           </div>
 
+          <h3 class="r2o-subheading">Removal Config</h3>
+          <p class="help">Click "Generate removal config" next to a helper above to build the "no ip helper-address" commands for every SVI that has it configured, plus the matching rollback below.</p>
+          <p id="ddi-removal-summary" class="help hidden"></p>
+          <textarea id="ddi-removal-config" class="command-list" rows="10" readonly placeholder="Select a helper above to generate its removal config"></textarea>
+
+          <h3 class="r2o-subheading">Rollback Config</h3>
+          <p class="help">The exact inverse of the removal config above - re-adds the same helper to the same SVIs, if you need to undo it.</p>
+          <textarea id="ddi-rollback-config" class="command-list" rows="10" readonly placeholder="Generated automatically alongside the removal config"></textarea>
+
           <h3 class="r2o-subheading">SVI Config (condensed)</h3>
           <textarea id="ddi-svi-config" class="command-list" rows="12" readonly></textarea>
+        </section>
+      </div>
+
+      <div id="compliance-view" class="app-view hidden">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">STANDARDS CHECK</p>
+            <h1>Compliance</h1>
+            <p class="subtitle">Check devices from a completed collection job against the customer's Tech Stack reference. Firmware compliance today; SNMP, syslog, ACLs, and QoS are planned follow-ups.</p>
+          </div>
+          <div class="status-pill"><span class="dot"></span> Local runner</div>
+        </header>
+
+        <section class="card">
+          <div class="card-header">
+            <div><p class="step">STEP 1</p><h2>Pick a job and upload the Tech Stack reference</h2></div>
+            <button id="compliance-refresh-jobs" class="button secondary" type="button">Refresh jobs</button>
+          </div>
+          <label class="field-label" for="compliance-job-select">Collection job</label>
+          <select id="compliance-job-select" class="table-input" style="max-width:560px"></select>
+          <p id="compliance-no-jobs" class="help hidden">No collection jobs yet. Run one from the Collector page first.</p>
+
+          <label class="field-label" for="compliance-tech-stack-file">Tech Stack reference file (.xlsx)</label>
+          <input id="compliance-tech-stack-file" type="file" accept=".xlsx">
+
+          <div class="button-row">
+            <button id="compliance-run-firmware" class="button primary" type="button">Run Firmware Check</button>
+          </div>
+          <p id="compliance-error" class="error-text hidden"></p>
+        </section>
+
+        <section id="compliance-results" class="card hidden">
+          <div class="card-header">
+            <div><p class="step">RESULTS</p><h2>Firmware Compliance</h2></div>
+          </div>
+          <div class="summary-grid">
+            <div><span>Compliant</span><strong id="compliance-compliant-count">0</strong></div>
+            <div><span>Non-compliant</span><strong id="compliance-noncompliant-count">0</strong></div>
+            <div><span>Unknown</span><strong id="compliance-unknown-count">0</strong></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Device</th><th>Host</th><th>Role</th><th>Model</th><th>Actual Version</th><th>Expected Version</th><th>Status</th><th>Notes</th></tr></thead>
+              <tbody id="compliance-results-body"></tbody>
+            </table>
+          </div>
         </section>
       </div>
     </main>
